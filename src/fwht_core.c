@@ -51,7 +51,19 @@
 #endif
 
 #ifdef _OPENMP
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wpedantic"
+#elif defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#endif
 #include <omp.h>
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#elif defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 #endif
 
 static void fwht_print_simd_banner(void) {
@@ -213,34 +225,52 @@ static void fwht_butterfly_f64(double* data, size_t n) {
  * ========================================================================== */
 
 static void fwht_butterfly_i32_openmp(int32_t* data, size_t n) {
-    for (size_t h = 1; h < n; h <<= 1) {
-        size_t stride = h << 1;
-        size_t blocks = n / stride;
-        #pragma omp parallel for schedule(static)
-        for (ptrdiff_t block = 0; block < (ptrdiff_t)blocks; ++block) {
-            size_t base = (size_t)block * stride;
-            for (size_t j = 0; j < h; ++j) {
-                int32_t a = data[base + j];
-                int32_t b = data[base + j + h];
-                data[base + j]     = a + b;
-                data[base + j + h] = a - b;
+    if (n < 2) {
+        return;
+    }
+
+    size_t pair_count = n >> 1; /* number of butterfly pairs per stage */
+
+#pragma omp parallel
+    {
+        for (size_t h = 1; h < n; h <<= 1) {
+#pragma omp for schedule(static)
+            for (ptrdiff_t pair_idx = 0; pair_idx < (ptrdiff_t)pair_count; ++pair_idx) {
+                size_t pair = (size_t)pair_idx;
+                size_t offset = pair & (h - 1);
+                size_t base = (pair & ~(h - 1)) << 1; /* flatten blocks to keep all threads busy */
+                size_t i = base + offset;
+
+                int32_t a = data[i];
+                int32_t b = data[i + h];
+                data[i]     = a + b;
+                data[i + h] = a - b;
             }
         }
     }
 }
 
 static void fwht_butterfly_f64_openmp(double* data, size_t n) {
-    for (size_t h = 1; h < n; h <<= 1) {
-        size_t stride = h << 1;
-        size_t blocks = n / stride;
-        #pragma omp parallel for schedule(static)
-        for (ptrdiff_t block = 0; block < (ptrdiff_t)blocks; ++block) {
-            size_t base = (size_t)block * stride;
-            for (size_t j = 0; j < h; ++j) {
-                double a = data[base + j];
-                double b = data[base + j + h];
-                data[base + j]     = a + b;
-                data[base + j + h] = a - b;
+    if (n < 2) {
+        return;
+    }
+
+    size_t pair_count = n >> 1;
+
+#pragma omp parallel
+    {
+        for (size_t h = 1; h < n; h <<= 1) {
+#pragma omp for schedule(static)
+            for (ptrdiff_t pair_idx = 0; pair_idx < (ptrdiff_t)pair_count; ++pair_idx) {
+                size_t pair = (size_t)pair_idx;
+                size_t offset = pair & (h - 1);
+                size_t base = (pair & ~(h - 1)) << 1;
+                size_t i = base + offset;
+
+                double a = data[i];
+                double b = data[i + h];
+                data[i]     = a + b;
+                data[i + h] = a - b;
             }
         }
     }

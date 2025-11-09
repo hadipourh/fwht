@@ -24,18 +24,80 @@
 #include "../include/fwht.h"
 #include <cuda_runtime.h>
 #include <stdio.h>
+#include <algorithm>
+#include <limits>
 
-/* Maximum threads per block (CUDA limit is 1024) */
+struct fwht_cuda_device_state {
+    cudaDeviceProp props;
+    bool initialized;
+};
+
+/* Maximum threads per block (CUDA architectural limit) */
 #define MAX_THREADS_PER_BLOCK 1024
 /* Maximum grid.y size that is widely supported */
 #define CUDA_BATCH_LIMIT 65535u
 
-/* Global configuration: stage kernel block size */
-static unsigned int g_fwht_block_size = 256;
+static fwht_cuda_device_state g_cuda_device_state = {{}, false};
+
+/* Global configuration: stage kernel block size (0 => auto) */
+static unsigned int g_fwht_block_override = 0;
 
 static fwht_status_t fwht_cuda_report(cudaError_t err, const char* file, int line) {
     fprintf(stderr, "CUDA error at %s:%d: %s\n", file, line, cudaGetErrorString(err));
     return FWHT_ERROR_CUDA;
+}
+
+static fwht_status_t fwht_cuda_ensure_device_state(void) {
+    if (g_cuda_device_state.initialized) {
+        return FWHT_SUCCESS;
+    }
+
+    int device = 0;
+    cudaError_t err = cudaGetDevice(&device);
+    if (err == cudaErrorNoDevice) {
+        return FWHT_ERROR_BACKEND_UNAVAILABLE;
+    }
+    if (err != cudaSuccess) {
+        return fwht_cuda_report(err, __FILE__, __LINE__);
+    }
+
+    cudaDeviceProp props;
+    err = cudaGetDeviceProperties(&props, device);
+    if (err != cudaSuccess) {
+        return fwht_cuda_report(err, __FILE__, __LINE__);
+    }
+
+    g_cuda_device_state.props = props;
+    g_cuda_device_state.initialized = true;
+    return FWHT_SUCCESS;
+}
+
+static unsigned int fwht_cuda_warp_size(void) {
+    if (g_cuda_device_state.initialized && g_cuda_device_state.props.warpSize > 0) {
+        return static_cast<unsigned int>(g_cuda_device_state.props.warpSize);
+    }
+    return 32u;
+}
+
+static unsigned int fwht_cuda_max_threads_per_block(void) {
+    if (g_cuda_device_state.initialized && g_cuda_device_state.props.maxThreadsPerBlock > 0) {
+        return static_cast<unsigned int>(g_cuda_device_state.props.maxThreadsPerBlock);
+    }
+    return MAX_THREADS_PER_BLOCK;
+}
+
+static unsigned int fwht_cuda_sm_count(void) {
+    if (g_cuda_device_state.initialized && g_cuda_device_state.props.multiProcessorCount > 0) {
+        return static_cast<unsigned int>(g_cuda_device_state.props.multiProcessorCount);
+    }
+    return 1u;
+}
+
+static unsigned int fwht_cuda_max_grid_x(void) {
+    if (g_cuda_device_state.initialized && g_cuda_device_state.props.maxGridSize[0] > 0) {
+        return static_cast<unsigned int>(g_cuda_device_state.props.maxGridSize[0]);
+    }
+    return 2147483647u; /* CUDA runtime guarantees at least this on modern devices */
 }
 
 /* CUDA error checking */
@@ -132,43 +194,73 @@ __global__ void fwht_stage_kernel(T* __restrict__ data,
                                   size_t pairs_per_transform,
                                   size_t batch_size) {
     size_t transform_idx = blockIdx.y;
-    size_t pair_idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (transform_idx >= batch_size || pair_idx >= pairs_per_transform) {
+    if (transform_idx >= batch_size) {
         return;
     }
 
-    unsigned long long h_ll = static_cast<unsigned long long>(h);
-    unsigned long long pair_ll = static_cast<unsigned long long>(pair_idx);
-    unsigned long long block = pair_ll / h_ll;
-    unsigned long long offset = pair_ll - block * h_ll;
-    unsigned long long base = static_cast<unsigned long long>(transform_idx) * n
-                            + block * (h_ll << 1) + offset;
+    size_t stride = static_cast<size_t>(gridDim.x) * blockDim.x;
+    size_t pair_idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-    T a = data[base];
-    T b = data[base + h];
-    data[base]     = a + b;
-    data[base + h] = a - b;
+    if (stride == 0) {
+        stride = blockDim.x;
+    }
+
+    unsigned long long h_ll = static_cast<unsigned long long>(h);
+
+    for (; pair_idx < pairs_per_transform; pair_idx += stride) {
+        unsigned long long pair_ll = static_cast<unsigned long long>(pair_idx);
+        unsigned long long block = pair_ll / h_ll;
+        unsigned long long offset = pair_ll - block * h_ll;
+        unsigned long long base = static_cast<unsigned long long>(transform_idx) * n
+                                + block * (h_ll << 1) + offset;
+
+        T a = data[base];
+        T b = data[base + h];
+        data[base]     = a + b;
+        data[base + h] = a - b;
+    }
 }
 
 static unsigned int fwht_effective_block_size(size_t pairs_per_transform) {
-    unsigned int block_size = g_fwht_block_size;
-
-    if (block_size == 0 || block_size > MAX_THREADS_PER_BLOCK) {
-        block_size = 256;
+    if (pairs_per_transform == 0) {
+        return 1u;
     }
 
-    if (pairs_per_transform < block_size) {
-        block_size = static_cast<unsigned int>(pairs_per_transform);
-        if (block_size == 0) {
-            block_size = 1;
+    unsigned int override = g_fwht_block_override;
+    unsigned int max_unsigned = std::numeric_limits<unsigned int>::max();
+    size_t capped_pairs = std::min(pairs_per_transform, static_cast<size_t>(max_unsigned));
+    unsigned int limit = std::min<unsigned int>(fwht_cuda_max_threads_per_block(),
+        static_cast<unsigned int>(capped_pairs));
+
+    if (limit == 0) {
+        return 1u;
+    }
+
+    unsigned int block_size = override;
+    if (block_size == 0) {
+        unsigned int warp = fwht_cuda_warp_size();
+        unsigned int candidate = 1;
+        while ((candidate << 1) <= limit) {
+            candidate <<= 1;
+        }
+        block_size = candidate;
+        if (block_size < warp && limit >= warp) {
+            block_size = warp;
         }
     }
 
-    if (block_size > 32) {
-        block_size = (block_size / 32u) * 32u;
+    if (block_size > limit) {
+        block_size = limit;
+    }
+
+    unsigned int warp = fwht_cuda_warp_size();
+    if (block_size > warp) {
+        block_size = (block_size / warp) * warp;
+    }
+    if (block_size == 0) {
+        block_size = std::min<unsigned int>(warp, limit);
         if (block_size == 0) {
-            block_size = 32u;
+            block_size = 1u;
         }
     }
 
@@ -180,7 +272,8 @@ static fwht_status_t fwht_launch_small(T* d_data, size_t n, size_t batch_size);
 
 template <>
 fwht_status_t fwht_launch_small<int32_t>(int32_t* d_data, size_t n, size_t batch_size) {
-    if (n > MAX_THREADS_PER_BLOCK) {
+    unsigned int max_threads = fwht_cuda_max_threads_per_block();
+    if (n > max_threads) {
         return FWHT_ERROR_INVALID_SIZE;
     }
     size_t processed = 0;
@@ -202,7 +295,8 @@ fwht_status_t fwht_launch_small<int32_t>(int32_t* d_data, size_t n, size_t batch
 
 template <>
 fwht_status_t fwht_launch_small<double>(double* d_data, size_t n, size_t batch_size) {
-    if (n > MAX_THREADS_PER_BLOCK) {
+    unsigned int max_threads = fwht_cuda_max_threads_per_block();
+    if (n > max_threads) {
         return FWHT_ERROR_INVALID_SIZE;
     }
     size_t processed = 0;
@@ -226,10 +320,44 @@ template <typename T>
 static fwht_status_t fwht_launch_large(T* d_data, size_t n, size_t batch_size) {
     size_t pairs_per_transform = n >> 1;
     unsigned int threads = fwht_effective_block_size(pairs_per_transform);
-    unsigned int blocks_x = static_cast<unsigned int>((pairs_per_transform + threads - 1) / threads);
+    unsigned long long work_items = pairs_per_transform;
+    unsigned int blocks_x = (threads == 0)
+        ? 1u
+        : static_cast<unsigned int>((work_items + threads - 1) / threads);
+
     if (blocks_x == 0) {
         blocks_x = 1;
     }
+
+    unsigned int min_blocks = fwht_cuda_sm_count() * 4u;
+    unsigned int max_grid_x = fwht_cuda_max_grid_x();
+
+    if (min_blocks == 0) {
+        min_blocks = 1;
+    }
+
+    unsigned int max_useful_blocks = static_cast<unsigned int>(std::min<size_t>(
+        std::max<size_t>(1, pairs_per_transform),
+        static_cast<size_t>(max_grid_x > 0 ? max_grid_x : std::numeric_limits<unsigned int>::max())));
+
+    if (max_useful_blocks > 0 && min_blocks > max_useful_blocks) {
+        min_blocks = max_useful_blocks;
+    }
+
+    unsigned int target_blocks = std::max(blocks_x, min_blocks);
+    if (max_useful_blocks > 0 && target_blocks > max_useful_blocks) {
+        target_blocks = max_useful_blocks;
+    }
+
+    if (max_grid_x > 0 && target_blocks > max_grid_x) {
+        target_blocks = max_grid_x;
+    }
+
+    if (target_blocks == 0) {
+        target_blocks = 1;
+    }
+
+    blocks_x = target_blocks;
 
     for (size_t h = 1; h < n; h <<= 1) {
         size_t processed = 0;
@@ -258,6 +386,11 @@ static fwht_status_t fwht_execute_cuda(T* data, size_t n, size_t batch_size) {
         return FWHT_ERROR_INVALID_ARGUMENT;
     }
 
+    fwht_status_t init_status = fwht_cuda_ensure_device_state();
+    if (init_status != FWHT_SUCCESS) {
+        return init_status;
+    }
+
     if (n > 0 && batch_size > (SIZE_MAX / n)) {
         return FWHT_ERROR_INVALID_SIZE;
     }
@@ -282,7 +415,7 @@ static fwht_status_t fwht_execute_cuda(T* data, size_t n, size_t batch_size) {
         goto cleanup;
     }
 
-    if (n <= MAX_THREADS_PER_BLOCK) {
+    if (n <= fwht_cuda_max_threads_per_block()) {
         status = fwht_launch_small<T>(d_data, n, batch_size);
     } else {
         status = fwht_launch_large<T>(d_data, n, batch_size);
@@ -319,18 +452,23 @@ extern "C" {
 
 /* GPU launch configuration */
 fwht_status_t fwht_gpu_set_block_size(unsigned int block_size) {
-    if (block_size == 0 || block_size > MAX_THREADS_PER_BLOCK) {
+    if (block_size == 0) {
+        g_fwht_block_override = 0;
+        return FWHT_SUCCESS;
+    }
+
+    if (block_size > MAX_THREADS_PER_BLOCK) {
         return FWHT_ERROR_INVALID_ARGUMENT;
     }
     if ((block_size & (block_size - 1)) != 0) {
         return FWHT_ERROR_INVALID_ARGUMENT;
     }
-    g_fwht_block_size = block_size;
+    g_fwht_block_override = block_size;
     return FWHT_SUCCESS;
 }
 
 unsigned int fwht_gpu_get_block_size(void) {
-    return g_fwht_block_size;
+    return g_fwht_block_override;
 }
 
 fwht_status_t fwht_i32_cuda(int32_t* data, size_t n) {

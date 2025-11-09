@@ -139,7 +139,8 @@ fwht_status_t fwht_f64_backend(double* data, size_t n, fwht_backend_t backend);
 #ifdef USE_CUDA
 /*
  * Configure CUDA execution parameters (optional).
- * Block size must be in (0, 1024] and typically a power of two.
+ * Provide a power-of-two block size in [1, 1024] to override auto-tuning.
+ * Pass 0 to revert to automatic selection based on the active GPU.
  */
 fwht_status_t fwht_gpu_set_block_size(unsigned int block_size);
 unsigned int  fwht_gpu_get_block_size(void);

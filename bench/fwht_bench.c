@@ -128,72 +128,146 @@ static int parse_sizes(const char* value, size_t** out_sizes, size_t* out_count)
     return 0;
 }
 
-static int run_benchmark(const bench_config_t* cfg) {
-    printf("FWHT Benchmark\n");
-    printf("Backend : %s\n", fwht_backend_name(cfg->backend));
-    printf("Repeats : %d\n", cfg->repeats);
-    printf("Warmup  : %d\n", cfg->warmup);
-    printf("Seed    : %u\n", cfg->seed);
-    printf("GPU available : %s\n\n", fwht_has_gpu() ? "yes" : "no");
-
+static void print_mode_header(const char* label) {
+    printf("Mode: %s\n", label);
     printf("%10s  %12s  %12s\n", "Size", "Mean (ms)", "StdDev (ms)");
     printf("%10s  %12s  %12s\n", "----------", "------------", "------------");
+}
 
-    int32_t* data = NULL;
-    size_t data_capacity = 0;
+static int ensure_capacity(int32_t** data_ptr, size_t* capacity_ptr, size_t n) {
+    if (*capacity_ptr >= n) {
+        return 0;
+    }
+
+    size_t bytes = n * sizeof(int32_t);
+    int32_t* tmp = (int32_t*)realloc(*data_ptr, bytes);
+    if (!tmp) {
+        fprintf(stderr, "Allocation failed for size %zu\n", n);
+        return -1;
+    }
+
+    *data_ptr = tmp;
+    *capacity_ptr = n;
+    return 0;
+}
+
+typedef struct {
+    double mean_ms;
+    double stddev_ms;
+    bool   valid;
+} bench_result_t;
+
+static bench_result_t measure_backend(const bench_config_t* cfg,
+                                      fwht_backend_t backend,
+                                      int32_t* data,
+                                      size_t n) {
+    bench_result_t result = {0.0, 0.0, false};
+    double mean = 0.0;
+    double m2 = 0.0;
+    int total_runs = cfg->warmup + cfg->repeats;
+
+    for (int run = 0; run < total_runs; ++run) {
+        fill_random(data, n, cfg->seed + (unsigned int)run);
+
+        double start = timestamp_seconds();
+        fwht_status_t status = fwht_i32_backend(data, n, backend);
+        double end = timestamp_seconds();
+
+        if (status != FWHT_SUCCESS) {
+            fprintf(stderr, "FWHT failed for size %zu: %s\n", n, fwht_error_string(status));
+            return result;
+        }
+
+        if (run < cfg->warmup) {
+            continue;
+        }
+
+        int sample_index = run - cfg->warmup;
+        double elapsed_ms = (end - start) * 1000.0;
+        double delta = elapsed_ms - mean;
+        mean += delta / (double)(sample_index + 1);
+        double delta2 = elapsed_ms - mean;
+        m2 += delta * delta2;
+    }
+
+    double variance = (cfg->repeats > 1) ? (m2 / (double)(cfg->repeats - 1)) : 0.0;
+    result.mean_ms = mean;
+    result.stddev_ms = (variance > 0.0) ? sqrt(variance) : 0.0;
+    result.valid = true;
+    return result;
+}
+
+static int benchmark_backend_mode(const bench_config_t* cfg,
+                                  fwht_backend_t backend,
+                                  const char* mode_label,
+                                  int32_t** data_ptr,
+                                  size_t* capacity_ptr) {
+    print_mode_header(mode_label);
 
     for (size_t i = 0; i < cfg->count; ++i) {
         size_t n = cfg->sizes[i];
-        size_t bytes = n * sizeof(int32_t);
-
-        if (data_capacity < n) {
-            int32_t* tmp = (int32_t*)realloc(data, bytes);
-            if (!tmp) {
-                fprintf(stderr, "Allocation failed for size %zu\n", n);
-                free(data);
-                return -1;
-            }
-            data = tmp;
-            data_capacity = n;
+        if (ensure_capacity(data_ptr, capacity_ptr, n) != 0) {
+            return -1;
         }
 
-        double mean = 0.0;
-        double m2 = 0.0;
-
-        int total_runs = cfg->warmup + cfg->repeats;
-        for (int run = 0; run < total_runs; ++run) {
-            fill_random(data, n, cfg->seed + (unsigned int)run);
-
-            double start = timestamp_seconds();
-            fwht_status_t status = fwht_i32_backend(data, n, cfg->backend);
-            double end = timestamp_seconds();
-
-            if (status != FWHT_SUCCESS) {
-                fprintf(stderr, "FWHT failed for size %zu: %s\n", n, fwht_error_string(status));
-                free(data);
-                return -1;
-            }
-
-            if (run < cfg->warmup) {
-                continue; /* skip statistics */
-            }
-
-            int sample_index = run - cfg->warmup;
-            double elapsed_ms = (end - start) * 1000.0;
-            double delta = elapsed_ms - mean;
-            mean += delta / (double)(sample_index + 1);
-            double delta2 = elapsed_ms - mean;
-            m2 += delta * delta2;
+        bench_result_t res = measure_backend(cfg, backend, *data_ptr, n);
+        if (!res.valid) {
+            return -1;
         }
 
-        double variance = (cfg->repeats > 1) ? (m2 / (double)(cfg->repeats - 1)) : 0.0;
-        double stddev = (variance > 0.0) ? sqrt(variance) : 0.0;
-
-        printf("%10zu  %12.3f  %12.3f\n", n, mean, stddev);
+        printf("%10zu  %12.3f  %12.3f\n", n, res.mean_ms, res.stddev_ms);
     }
 
-    free(data);
+    printf("\n");
     return 0;
+}
+
+static int run_benchmark(const bench_config_t* cfg) {
+    printf("FWHT Benchmark\n");
+    printf("Requested backend : %s\n", fwht_backend_name(cfg->backend));
+    printf("Repeats : %d\n", cfg->repeats);
+    printf("Warmup  : %d\n", cfg->warmup);
+    printf("Seed    : %u\n", cfg->seed);
+    printf("GPU available    : %s\n", fwht_has_gpu() ? "yes" : "no");
+    printf("OpenMP available : %s\n\n", fwht_has_openmp() ? "yes" : "no");
+
+    int32_t* data = NULL;
+    size_t data_capacity = 0;
+    int rc = 0;
+
+    if (cfg->backend == FWHT_BACKEND_CPU) {
+        const char* mode_labels[] = {
+            "cpu (single-threaded)",
+            "openmp (multi-threaded)",
+            "auto (runtime selection)"
+        };
+        const fwht_backend_t mode_backends[] = {
+            FWHT_BACKEND_CPU,
+            FWHT_BACKEND_OPENMP,
+            FWHT_BACKEND_AUTO
+        };
+        size_t mode_count = sizeof(mode_backends) / sizeof(mode_backends[0]);
+
+        for (size_t i = 0; i < mode_count; ++i) {
+            if (mode_backends[i] == FWHT_BACKEND_OPENMP && !fwht_has_openmp()) {
+                printf("Mode: %s\n", mode_labels[i]);
+                printf("  Skipped (OpenMP backend not available; rebuild with `make openmp` to enable)\n\n");
+                continue;
+            }
+
+            rc = benchmark_backend_mode(cfg, mode_backends[i], mode_labels[i], &data, &data_capacity);
+            if (rc != 0) {
+                goto cleanup;
+            }
+        }
+    } else {
+        const char* label = fwht_backend_name(cfg->backend);
+        rc = benchmark_backend_mode(cfg, cfg->backend, label, &data, &data_capacity);
+    }
+
+cleanup:
+    free(data);
+    return rc;
 }
 
 int main(int argc, char** argv) {

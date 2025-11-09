@@ -17,6 +17,7 @@ High-performance C99 library for computing the Fast Walsh-Hadamard Transform (FW
 - Runs in-place with `O(n log n)` arithmetic complexity and `O(1)` auxiliary storage
 - CPU backend auto-detects SIMD support (AVX2, SSE2, or NEON) and falls back to scalar code when unavailable
 - Automatic backend selection prefers GPU for large instances and OpenMP for medium-sized workloads
+- CUDA backend auto-tunes its grid/block configuration from the active device (override with `fwht_gpu_set_block_size` when needed)
 
 ## Build and Install
 
@@ -52,11 +53,13 @@ Compile with `gcc example.c -lfwht -lm` (or link directly against `libfwht.a` in
 
 ### Core API Highlights
 
-- `fwht_i32`, `fwht_f64`, `fwht_i8`: in-place transforms with automatic backend selection
-- `fwht_i32_backend`, `fwht_f64_backend`: force `AUTO`, `CPU`, `OPENMP`, or `GPU`
-- `fwht_from_bool`: convert a Boolean table to signed Walsh coefficients
-- `fwht_correlations`: correlation values for every linear mask
-- `fwht_has_gpu`, `fwht_has_openmp`, `fwht_backend_name`: runtime capability queries
+- `fwht_i32`: in-place transform for `int32_t` data (default entry point for Boolean spectra)
+- `fwht_f64`: in-place transform for `double` data when fractional coefficients matter
+- `fwht_i8`: in-place transform for `int8_t` data to minimize memory footprint (watch for overflow)
+- `fwht_i32_backend`, `fwht_f64_backend`: same transforms with explicit backend selection (`AUTO`, `CPU`, `OPENMP`, `GPU`)
+- `fwht_from_bool`: convert a Boolean truth table to signed Walsh coefficients before transforming
+- `fwht_correlations`: normalize Walsh coefficients to per-mask correlation values
+- `fwht_has_gpu`, `fwht_has_openmp`, `fwht_backend_name`: query runtime capabilities and selected backend
 
 ## Command-Line Interface
 
@@ -115,6 +118,7 @@ Measurements gathered with `./build/fwht_bench` using `--repeats=10` (GPU runs i
 make bench
 
 # CPU timings on the Apple M4 host
+make openmp
 ./build/fwht_bench \
     --backend=cpu \
     --sizes=16777216,33554432,67108864,134217728,268435456 \
@@ -134,13 +138,23 @@ Each command samples the same transform sizes reported in the tables below. Adju
 CPU: Apple M4 (10 physical / 10 logical cores)
 Memory: 24 GiB unified
 
-| Size (points) | Mean (ms) | StdDev (ms) |
-| ------------: | --------: | ----------: |
-|    16,777,216 |    38.971 |       1.367 |
-|    33,554,432 |    84.683 |       2.705 |
-|    67,108,864 |   179.281 |       1.277 |
-|   134,217,728 |   375.574 |       3.970 |
-|   268,435,456 |   775.401 |      15.135 |
+| Mode | Size (points) | Mean (ms) | StdDev (ms) |
+| :--- | ------------: | --------: | ----------: |
+| cpu (single-threaded) |    16,777,216 |    37.935 |       1.685 |
+|  |    33,554,432 |    89.638 |       8.207 |
+|  |    67,108,864 |   172.907 |       4.434 |
+|  |   134,217,728 |   353.781 |       2.846 |
+|  |   268,435,456 |   733.108 |      10.635 |
+| openmp (multi-threaded) |    16,777,216 |    27.602 |       1.109 |
+|  |    33,554,432 |    61.920 |       0.695 |
+|  |    67,108,864 |   133.844 |       1.170 |
+|  |   134,217,728 |   282.285 |       7.859 |
+|  |   268,435,456 |   586.918 |       6.049 |
+| auto (runtime selection) |    16,777,216 |    27.461 |       0.468 |
+|  |    33,554,432 |    62.273 |       0.937 |
+|  |    67,108,864 |   133.579 |       1.280 |
+|  |   134,217,728 |   279.426 |       1.640 |
+|  |   268,435,456 |   584.172 |       2.441 |
 
 **NVIDIA A30 server (Linux 5.14.0-570.49.1.el9_6.x86_64)**
 GPU: NVIDIA A30 (CUDA 13.0 runtime, driver 580.95.05, nvcc 12.6.68)
@@ -157,7 +171,9 @@ System RAM: 377 GiB, GPU RAM: 24 GiB
 
 Observed trends:
 
-- GPU overtakes CPU decisively beyond `2^24` points, delivering ~3–4× speedup even with PCIe transfers.
+- GPU overtakes the CPU decisively beyond `2^24` points, delivering ~3–4× speedup even with PCIe transfers.
+- Building with `make openmp` roughly halves CPU runtime on 10-core Apple silicon for 32M–256M point transforms relative to the single-thread baseline.
+- The `auto` backend selects OpenMP at these sizes, matching the dedicated multi-thread timings.
 - Sub-`2^22` workloads benefit from CPU execution unless multiple transforms are batched on the GPU.
 - Adjust `fwht_gpu_set_block_size` and reuse device buffers to minimise launch overhead for long-running jobs.
 
