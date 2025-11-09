@@ -42,6 +42,7 @@ BUILD_DIR = build
 LIB_DIR = lib
 TOOLS_DIR = tools
 BENCH_DIR = bench
+EXAMPLES_DIR = examples
 
 # Output
 LIB_NAME = libfwht
@@ -50,6 +51,8 @@ SHARED_LIB = $(LIB_DIR)/$(LIB_NAME).so
 TEST_BIN = $(BUILD_DIR)/test_correctness
 CLI_SRC = $(TOOLS_DIR)/fwht_cli.c
 CLI_BIN = $(BUILD_DIR)/fwht_cli
+EXAMPLE_SRC = $(EXAMPLES_DIR)/example_basic.c
+EXAMPLE_BIN = $(EXAMPLES_DIR)/example_basic
 
 # Source files (CPU)
 SRCS = $(wildcard $(SRC_DIR)/*.c)
@@ -204,6 +207,14 @@ else
 endif
 	@echo "Run with: ./build/fwht_bench [options]"
 
+# Build example programs
+examples: directories lib $(EXAMPLE_BIN)
+	@echo "Example binaries available in $(EXAMPLES_DIR)/"
+
+$(EXAMPLE_BIN): $(EXAMPLE_SRC) $(STATIC_LIB)
+	@echo "Building example: $@"
+	$(CC) $(CFLAGS) $< -L$(LIB_DIR) -lfwht -lm -o $@ -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
+
 # Build and run GPU-specific tests (only if CUDA available)
 test-gpu: lib
 ifeq ($(USE_CUDA),1)
@@ -230,6 +241,7 @@ endif
 clean:
 	@echo "Cleaning build artifacts..."
 	rm -rf $(BUILD_DIR) $(LIB_DIR)
+	rm -f $(EXAMPLE_BIN)
 
 # Install library (requires sudo on most systems)
 install: lib
@@ -300,6 +312,7 @@ help:
 	@echo "  shared    - Build shared library only"
 	@echo "  test      - Build and run test suite"
 	@echo "  cli       - Build the fwht_cli command-line tool"
+	@echo "  examples  - Build example programs under $(EXAMPLES_DIR)/"
 	@echo "  clean     - Remove build artifacts"
 	@echo "  install   - Install library to /usr/local (requires sudo)"
 	@echo "  uninstall - Remove installed library"
