@@ -1,8 +1,22 @@
 # Fast Walsh-Hadamard Transform (FWHT) Library
 # Makefile
 #
+# Copyright (C) 2025 Hosein Hadipour
+#
 # Author: Hosein Hadipour <hsn.hadipour@gmail.com>
-# License: MIT
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 # ============================================================================
 # Configuration
@@ -10,7 +24,13 @@
 
 CC = gcc
 NVCC = nvcc
-CFLAGS = -std=c99 -O3 -march=native -Wall -Wextra -pedantic -I$(INCLUDE_DIR)
+BASE_CFLAGS = -std=c99 -O3 -Wall -Wextra -pedantic -pthread -I$(INCLUDE_DIR)
+CFLAGS = $(BASE_CFLAGS)
+ifeq ($(NO_SIMD),1)
+	CFLAGS +=
+else
+	CFLAGS += -march=native
+endif
 NVCCFLAGS = -O3 -I$(INCLUDE_DIR) --compiler-options -fPIC
 LDFLAGS =
 
@@ -265,6 +285,7 @@ info:
 	@echo "  Compiler: $(CC)"
 	@echo "  CFLAGS: $(CFLAGS)"
 	@echo "  LDFLAGS: $(LDFLAGS)"
+	@echo "  SIMD: $(if $(NO_SIMD),disabled (NO_SIMD=1),auto -march=native)"
 	@echo "  OpenMP: $(if $(OPENMP_CFLAGS),enabled,disabled)"
 	@echo "  CUDA: $(if $(USE_CUDA),enabled ($(shell which nvcc)),disabled)"
 
@@ -298,5 +319,6 @@ help:
 	@echo "  make                  # Build and test"
 	@echo "  make openmp          # Build with OpenMP"
 	@echo "  make NO_OPENMP=1     # Build without OpenMP"
+	@echo "  make NO_SIMD=1       # Build without auto SIMD flags"
 	@echo "  make debug           # Debug build"
 	@echo "  sudo make install    # Install library"

@@ -2,14 +2,21 @@
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
-High-performance C99 library for computing the Fast Walsh-Hadamard Transform (FWHT), a fundamental tool in cryptanalysis and Boolean function analysis. The library provides multiple backend implementations (single-threaded CPU, OpenMP, and CUDA) with automatic selection based on problem size, offering optimal performance across different hardware configurations.
+High-performance C99 library for computing the Fast Walsh-Hadamard Transform (FWHT), a fundamental tool in cryptanalysis and Boolean function analysis. The library provides multiple backend implementations (vectorized single-threaded CPU, OpenMP, and CUDA) with automatic selection based on problem size, offering optimal performance across different hardware configurations.
 
 ## Overview
 
 - C99 Walsh–Hadamard transform library for cryptanalysis and Boolean function analysis
-- Backends: single-threaded CPU, OpenMP (optional), CUDA (optional)
+- Backends: vectorized single-threaded CPU, OpenMP (optional), CUDA (optional)
 - API surface covers in-place transforms, out-of-place helpers, and Boolean convenience routines
 - Complementary command-line tool for one-off spectrum inspection
+
+## Algorithm
+
+- Uses the iterative Cooley–Tukey butterfly formulation of the Walsh-Hadamard Transform
+- Runs in-place with `O(n log n)` arithmetic complexity and `O(1)` auxiliary storage
+- CPU backend auto-detects SIMD support (AVX2, SSE2, or NEON) and falls back to scalar code when unavailable
+- Automatic backend selection prefers GPU for large instances and OpenMP for medium-sized workloads
 
 ## Build and Install
 
