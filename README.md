@@ -8,6 +8,7 @@ High-performance C99 library for computing the Fast Walsh-Hadamard Transform (FW
 
 - C99 Walsh–Hadamard transform library for cryptanalysis and Boolean function analysis
 - Backends: vectorized single-threaded CPU, OpenMP (optional), CUDA (optional)
+- OpenMP backend now reuses the SIMD kernels and tiles large butterflies so all threads stay busy on massive inputs
 - API surface covers in-place transforms, out-of-place helpers, and Boolean convenience routines
 - Complementary command-line tool for one-off spectrum inspection
 
@@ -172,7 +173,7 @@ System RAM: 377 GiB, GPU RAM: 24 GiB
 Observed trends:
 
 - GPU overtakes the CPU decisively beyond `2^24` points, delivering ~3–4× speedup even with PCIe transfers.
-- Building with `make openmp` roughly halves CPU runtime on 10-core Apple silicon for 32M–256M point transforms relative to the single-thread baseline.
+- Building with `make openmp` engages the SIMD-aware tiling pass, roughly halves CPU runtime on 10-core Apple silicon for 32M–256M point transforms relative to the single-thread baseline, and keeps scaling through the final stages.
 - The `auto` backend selects OpenMP at these sizes, matching the dedicated multi-thread timings.
 - Sub-`2^22` workloads benefit from CPU execution unless multiple transforms are batched on the GPU.
 - Adjust `fwht_gpu_set_block_size` and reuse device buffers to minimise launch overhead for long-running jobs.

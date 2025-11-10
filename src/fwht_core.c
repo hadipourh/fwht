@@ -66,6 +66,12 @@
 #endif
 #endif
 
+/* Tile size used when slicing OpenMP work inside large butterflies. */
+#ifdef _OPENMP
+#define FWHT_OMP_TILE_I32 256u
+#define FWHT_OMP_TILE_F64 128u
+#endif
+
 static void fwht_print_simd_banner(void) {
 #if defined(FWHT_HAVE_AVX2)
     fprintf(stderr, "[libfwht] CPU backend: AVX2 vector path active\n");
@@ -104,6 +110,124 @@ static void fwht_report_simd_mode(void) {
 #endif
 }
 
+static inline void fwht_process_range_i32(int32_t* even, int32_t* odd, size_t count) {
+    if (count == 0) {
+        return;
+    }
+
+    size_t j = 0;
+
+#if defined(FWHT_HAVE_AVX2)
+    if (count >= 8) {
+        size_t avx_end = count & (size_t)~7;
+        for (; j < avx_end; j += 8) {
+            __m256i a = _mm256_loadu_si256((const __m256i*)(even + j));
+            __m256i b = _mm256_loadu_si256((const __m256i*)(odd + j));
+            __m256i sum = _mm256_add_epi32(a, b);
+            __m256i diff = _mm256_sub_epi32(a, b);
+            _mm256_storeu_si256((__m256i*)(even + j), sum);
+            _mm256_storeu_si256((__m256i*)(odd + j), diff);
+        }
+    }
+#endif
+
+#if defined(FWHT_HAVE_SSE2) && !defined(FWHT_HAVE_NEON)
+    if (count >= 4) {
+        size_t sse_end = count & (size_t)~3;
+        for (; j < sse_end; j += 4) {
+            __m128i a = _mm_loadu_si128((const __m128i*)(even + j));
+            __m128i b = _mm_loadu_si128((const __m128i*)(odd + j));
+            __m128i sum = _mm_add_epi32(a, b);
+            __m128i diff = _mm_sub_epi32(a, b);
+            _mm_storeu_si128((__m128i*)(even + j), sum);
+            _mm_storeu_si128((__m128i*)(odd + j), diff);
+        }
+    }
+#endif
+
+#if defined(FWHT_HAVE_NEON)
+    if (count >= 4) {
+        size_t neon_end = count & (size_t)~3;
+        for (; j < neon_end; j += 4) {
+            int32x4_t a = vld1q_s32(even + j);
+            int32x4_t b = vld1q_s32(odd + j);
+            int32x4_t sum = vaddq_s32(a, b);
+            int32x4_t diff = vsubq_s32(a, b);
+            vst1q_s32(even + j, sum);
+            vst1q_s32(odd + j, diff);
+        }
+    }
+#endif
+
+    for (; j < count; ++j) {
+        int32_t a = even[j];
+        int32_t b = odd[j];
+        even[j] = a + b;
+        odd[j]  = a - b;
+    }
+}
+
+static inline void fwht_process_block_i32(int32_t* data, size_t base, size_t h) {
+    fwht_process_range_i32(data + base, data + base + h, h);
+}
+
+static inline void fwht_process_range_f64(double* even, double* odd, size_t count) {
+    if (count == 0) {
+        return;
+    }
+
+    for (size_t j = 0; j < count; ++j) {
+        double a = even[j];
+        double b = odd[j];
+        even[j] = a + b;
+        odd[j]  = a - b;
+    }
+}
+
+static inline void fwht_process_block_f64(double* data, size_t base, size_t h) {
+    fwht_process_range_f64(data + base, data + base + h, h);
+}
+
+#ifdef _OPENMP
+static inline void fwht_process_segment_i32(int32_t* data,
+                                            size_t base,
+                                            size_t h,
+                                            size_t offset,
+                                            size_t length) {
+    size_t start = base + offset;
+    size_t upper = base + h;
+    if (start >= upper) {
+        return;
+    }
+
+    size_t clipped = length;
+    if (start + clipped > upper) {
+        clipped = upper - start;
+    }
+
+    fwht_process_range_i32(data + start, data + start + h, clipped);
+}
+
+static inline void fwht_process_segment_f64(double* data,
+                                            size_t base,
+                                            size_t h,
+                                            size_t offset,
+                                            size_t length) {
+    size_t start = base + offset;
+    size_t upper = base + h;
+    if (start >= upper) {
+        return;
+    }
+
+    size_t clipped = length;
+    if (start + clipped > upper) {
+        clipped = upper - start;
+    }
+
+    fwht_process_range_f64(data + start, data + start + h, clipped);
+}
+#endif /* _OPENMP */
+
 /* =========================================================================
  * VALIDATION HELPERS
  * ========================================================================== */
@@ -134,7 +258,7 @@ static fwht_status_t validate_input(const void* data, size_t n) {
 
 static void fwht_butterfly_i32(int32_t* data, size_t n) {
     fwht_report_simd_mode();
-    /* 
+    /*
      * Butterfly algorithm with optional SIMD acceleration.
      * For each stage h = 1, 2, 4, ..., n/2:
      *   Process pairs (data[i], data[i+h]) for all applicable i
@@ -144,57 +268,7 @@ static void fwht_butterfly_i32(int32_t* data, size_t n) {
     for (size_t h = 1; h < n; h <<= 1) {
         size_t stride = h << 1;
         for (size_t i = 0; i < n; i += stride) {
-            size_t limit = i + h;
-            size_t j = i;
-
-#if defined(FWHT_HAVE_AVX2)
-            if (h >= 8) {
-                size_t avx_end = limit - ((limit - j) & (size_t)7);
-                for (; j < avx_end; j += 8) {
-                    __m256i a = _mm256_loadu_si256((const __m256i*)(data + j));
-                    __m256i b = _mm256_loadu_si256((const __m256i*)(data + j + h));
-                    __m256i sum = _mm256_add_epi32(a, b);
-                    __m256i diff = _mm256_sub_epi32(a, b);
-                    _mm256_storeu_si256((__m256i*)(data + j), sum);
-                    _mm256_storeu_si256((__m256i*)(data + j + h), diff);
-                }
-            }
-#endif
-
-#if defined(FWHT_HAVE_SSE2) && !defined(FWHT_HAVE_NEON)
-            if (h >= 4) {
-                size_t sse_end = limit - ((limit - j) & (size_t)3);
-                for (; j < sse_end; j += 4) {
-                    __m128i a = _mm_loadu_si128((const __m128i*)(data + j));
-                    __m128i b = _mm_loadu_si128((const __m128i*)(data + j + h));
-                    __m128i sum = _mm_add_epi32(a, b);
-                    __m128i diff = _mm_sub_epi32(a, b);
-                    _mm_storeu_si128((__m128i*)(data + j), sum);
-                    _mm_storeu_si128((__m128i*)(data + j + h), diff);
-                }
-            }
-#endif
-
-#if defined(FWHT_HAVE_NEON)
-            if (h >= 4) {
-                size_t neon_end = limit - ((limit - j) & (size_t)3);
-                for (; j < neon_end; j += 4) {
-                    int32x4_t a = vld1q_s32(data + j);
-                    int32x4_t b = vld1q_s32(data + j + h);
-                    int32x4_t sum = vaddq_s32(a, b);
-                    int32x4_t diff = vsubq_s32(a, b);
-                    vst1q_s32(data + j, sum);
-                    vst1q_s32(data + j + h, diff);
-                }
-            }
-#endif
-
-            for (; j < limit; ++j) {
-                int32_t a = data[j];
-                int32_t b = data[j + h];
-                data[j]     = a + b;  /* Sum */
-                data[j + h] = a - b;  /* Difference */
-            }
+            fwht_process_block_i32(data, i, h);
         }
     }
 }
@@ -209,12 +283,7 @@ static void fwht_butterfly_f64(double* data, size_t n) {
     fwht_report_simd_mode();
     for (size_t h = 1; h < n; h <<= 1) {
         for (size_t i = 0; i < n; i += (h << 1)) {
-            for (size_t j = i; j < i + h; ++j) {
-                double a = data[j];
-                double b = data[j + h];
-                data[j]     = a + b;
-                data[j + h] = a - b;
-            }
+            fwht_process_block_f64(data, i, h);
         }
     }
 }
@@ -229,22 +298,37 @@ static void fwht_butterfly_i32_openmp(int32_t* data, size_t n) {
         return;
     }
 
-    size_t pair_count = n >> 1; /* number of butterfly pairs per stage */
-
 #pragma omp parallel
     {
+        int threads = omp_get_num_threads();
         for (size_t h = 1; h < n; h <<= 1) {
+            size_t stride = h << 1;
+            size_t blocks = n / stride;
+            if (blocks >= (size_t)threads) {
 #pragma omp for schedule(static)
-            for (ptrdiff_t pair_idx = 0; pair_idx < (ptrdiff_t)pair_count; ++pair_idx) {
-                size_t pair = (size_t)pair_idx;
-                size_t offset = pair & (h - 1);
-                size_t base = (pair & ~(h - 1)) << 1; /* flatten blocks to keep all threads busy */
-                size_t i = base + offset;
-
-                int32_t a = data[i];
-                int32_t b = data[i + h];
-                data[i]     = a + b;
-                data[i + h] = a - b;
+                for (ptrdiff_t block = 0; block < (ptrdiff_t)blocks; ++block) {
+                    size_t base = (size_t)block * stride;
+                    fwht_process_block_i32(data, base, h);
+                }
+            } else {
+                size_t tile = FWHT_OMP_TILE_I32;
+                if (tile > h) {
+                    tile = h;
+                }
+                size_t segments_per_block = (h + tile - 1) / tile;
+                size_t total_segments = blocks * segments_per_block;
+#pragma omp for schedule(static)
+                for (ptrdiff_t seg = 0; seg < (ptrdiff_t)total_segments; ++seg) {
+                    size_t block = (size_t)seg / segments_per_block;
+                    size_t seg_in_block = (size_t)seg % segments_per_block;
+                    size_t offset = seg_in_block * tile;
+                    size_t len = tile;
+                    if (offset + len > h) {
+                        len = h - offset;
+                    }
+                    size_t base = block * stride;
+                    fwht_process_segment_i32(data, base, h, offset, len);
+                }
             }
         }
     }
@@ -255,22 +339,37 @@ static void fwht_butterfly_f64_openmp(double* data, size_t n) {
         return;
     }
 
-    size_t pair_count = n >> 1;
-
 #pragma omp parallel
     {
+        int threads = omp_get_num_threads();
         for (size_t h = 1; h < n; h <<= 1) {
+            size_t stride = h << 1;
+            size_t blocks = n / stride;
+            if (blocks >= (size_t)threads) {
 #pragma omp for schedule(static)
-            for (ptrdiff_t pair_idx = 0; pair_idx < (ptrdiff_t)pair_count; ++pair_idx) {
-                size_t pair = (size_t)pair_idx;
-                size_t offset = pair & (h - 1);
-                size_t base = (pair & ~(h - 1)) << 1;
-                size_t i = base + offset;
-
-                double a = data[i];
-                double b = data[i + h];
-                data[i]     = a + b;
-                data[i + h] = a - b;
+                for (ptrdiff_t block = 0; block < (ptrdiff_t)blocks; ++block) {
+                    size_t base = (size_t)block * stride;
+                    fwht_process_block_f64(data, base, h);
+                }
+            } else {
+                size_t tile = FWHT_OMP_TILE_F64;
+                if (tile > h) {
+                    tile = h;
+                }
+                size_t segments_per_block = (h + tile - 1) / tile;
+                size_t total_segments = blocks * segments_per_block;
+#pragma omp for schedule(static)
+                for (ptrdiff_t seg = 0; seg < (ptrdiff_t)total_segments; ++seg) {
+                    size_t block = (size_t)seg / segments_per_block;
+                    size_t seg_in_block = (size_t)seg % segments_per_block;
+                    size_t offset = seg_in_block * tile;
+                    size_t len = tile;
+                    if (offset + len > h) {
+                        len = h - offset;
+                    }
+                    size_t base = block * stride;
+                    fwht_process_segment_f64(data, base, h, offset, len);
+                }
             }
         }
     }
