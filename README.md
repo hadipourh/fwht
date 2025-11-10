@@ -15,7 +15,7 @@ High-performance C99 library for computing the Fast Walsh-Hadamard Transform (FW
 ## Algorithm
 
 - Uses the iterative Cooley–Tukey butterfly formulation of the Walsh-Hadamard Transform
-- Runs in-place with `O(n log n)` arithmetic complexity; total memory usage is `O(n)` for the input array with `O(1)` auxiliary storage (no temporary buffers)
+- Runs in-place with `O(n log n)` arithmetic complexity; total memory usage is `O(n)` for the input array with `O(1)` auxiliary storage (no temporary buffers), where `n = 2^k` is the truth table size for a k-variable Boolean function
 - CPU backend auto-detects SIMD support (AVX2, SSE2, or NEON) and falls back to scalar code when unavailable
 - Automatic backend selection prefers GPU for large instances and OpenMP for medium-sized workloads
 - CUDA backend auto-tunes its grid/block configuration from the active device (override with `fwht_gpu_set_block_size` when needed)
