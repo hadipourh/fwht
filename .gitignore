@@ -1,0 +1,25 @@
+# Build artifacts
+build/
+lib/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Python - covered by python/.gitignore
+python/build/
+python/dist/
+python/*.egg-info/
+python/__pycache__/
+python/build_env/
+python/c_src/
+python/include/

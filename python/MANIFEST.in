@@ -1,0 +1,18 @@
+include README.md
+include LICENSE
+recursive-include pyfwht *.py *.pyi
+recursive-include src *.cpp *.h
+recursive-include include *.h
+recursive-include c_src *.c *.cu *.h
+
+# Exclude build artifacts and cache
+global-exclude *.pyc
+global-exclude *.pyo
+global-exclude __pycache__
+global-exclude *.so
+global-exclude *.dylib
+global-exclude *.dll
+global-exclude .DS_Store
+
+# Exclude benchmark scripts (development only)
+exclude gpu_benchmark.py

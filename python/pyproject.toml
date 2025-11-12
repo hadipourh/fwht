@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "pybind11>=2.10"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyfwht"
+version = "1.0.0"
+description = "Fast Walsh-Hadamard Transform with CPU, OpenMP, and CUDA backends"
+authors = [{name = "Hosein Hadipour", email = "hsn.hadipour@gmail.com"}]
+readme = "README.md"
+license = {text = "GPL-3.0-or-later"}
+requires-python = ">=3.8"
+dependencies = ["numpy>=1.20.0"]
+
+keywords = [
+    "walsh-hadamard",
+    "fwht",
+    "cryptanalysis",
+    "boolean-functions",
+    "cuda",
+    "gpu",
+    "simd",
+    "vectorization"
+]
+
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: C",
+    "Programming Language :: C++",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Security :: Cryptography",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/hadipourh/fwht"
+Repository = "https://github.com/hadipourh/fwht"
+Documentation = "https://github.com/hadipourh/fwht/blob/main/python/README.md"
+Issues = "https://github.com/hadipourh/fwht/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-benchmark>=4.0",
+    "black>=23.0",
+    "mypy>=1.0",
+    "ruff>=0.1.0"
+]
+
+[tool.black]
+line-length = 100
+target-version = ['py38', 'py39', 'py310', 'py311', 'py312']
+
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false

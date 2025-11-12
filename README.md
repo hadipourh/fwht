@@ -4,6 +4,10 @@
 
 High-performance C99 library for computing the Fast Walsh-Hadamard Transform (FWHT), a fundamental tool in cryptanalysis and Boolean function analysis. The library provides multiple backend implementations (vectorized single-threaded CPU, OpenMP, and CUDA) with automatic selection based on problem size, offering optimal performance across different hardware configurations.
 
+<p align="center">
+  <img src="examples/butterfly.svg" alt="FWHT Butterfly Diagram" width="200">
+</p>
+
 ## Overview
 
 - C99 Walsh–Hadamard transform library for cryptanalysis and Boolean function analysis
@@ -14,8 +18,8 @@ High-performance C99 library for computing the Fast Walsh-Hadamard Transform (FW
 
 ## Algorithm
 
-- Uses the iterative Cooley–Tukey butterfly formulation of the Walsh-Hadamard Transform
-- Runs in-place with `O(n log n)` arithmetic complexity; total memory usage is `O(n)` for the input array with `O(1)` auxiliary storage (no temporary buffers), where `n = 2^k` is the truth table size for a k-variable Boolean function
+- Fast Walsh-Hadamard Transform with iterative butterfly operations running in-place at `O(n log n)` complexity
+- Total memory usage is `O(n)` for the input array with `O(1)` auxiliary storage (no temporary buffers), where `n = 2^k` is the truth table size for a k-variable Boolean function
 - CPU backend auto-detects SIMD support (AVX2, SSE2, or NEON) and falls back to scalar code when unavailable
 - Automatic backend selection prefers GPU for large instances and OpenMP for medium-sized workloads
 - CUDA backend auto-tunes its grid/block configuration from the active device (override with `fwht_gpu_set_block_size` when needed)
@@ -61,6 +65,43 @@ Compile with `gcc example.c -lfwht -lm` (or link directly against `libfwht.a` in
 - `fwht_from_bool`: convert a Boolean truth table to signed Walsh coefficients before transforming
 - `fwht_correlations`: normalize Walsh coefficients to per-mask correlation values
 - `fwht_has_gpu`, `fwht_has_openmp`, `fwht_backend_name`: query runtime capabilities and selected backend
+
+## Python Package
+
+Python bindings are available via PyPI for seamless NumPy integration:
+
+```bash
+# Install from PyPI
+pip install pyfwht
+
+# Enable CUDA support (requires CUDA toolkit)
+USE_CUDA=1 pip install pyfwht --no-binary :all:
+```
+
+### Quick Example
+
+```python
+import numpy as np
+import pyfwht as fwht
+
+# Boolean function analysis
+truth_table = np.array([0, 1, 1, 0, 1, 0, 0, 1], dtype=np.uint8)
+wht_coeffs = fwht.from_bool(truth_table, signed=True)
+print(wht_coeffs)
+
+# Automatic backend selection (CPU/OpenMP/GPU)
+data = np.random.randint(-100, 100, size=2**20, dtype=np.int32)
+fwht.transform(data)  # In-place, auto-selects best backend
+```
+
+**Features:**
+- Zero-copy NumPy integration
+- Automatic backend selection (CPU SIMD, OpenMP, CUDA)
+- Support for `int8`, `int32`, and `float64` data types
+- Boolean function utilities for cryptanalysis
+- GPU achieves 30+ GOps/s with 9-10× speedup over CPU
+
+See [`python/README.md`](python/README.md) for complete documentation and API reference.
 
 ## Command-Line Interface
 
@@ -181,12 +222,25 @@ Observed trends:
 ## Repository Layout
 
 ```
-include/fwht.h      Public header
-src/                Core CPU implementation, backend dispatcher, CUDA code
-examples/           Minimal usage samples
-tests/              CPU and GPU regression programs
-tools/fwht_cli.c    Command-line interface source
-Makefile            Build orchestration
+libfwht/
+├── include/
+│   └── fwht.h              Public C header
+├── src/
+│   ├── fwht_core.c         Core CPU implementation with SIMD
+│   ├── fwht_backend.c      Backend dispatcher
+│   ├── fwht_cuda.cu        CUDA GPU implementation
+│   └── fwht_internal.h     Internal definitions
+├── python/
+│   ├── pyfwht/             Python package with NumPy integration
+│   ├── tests/              Python test suite
+│   ├── examples/           Python usage examples
+│   ├── setup.py            Build configuration
+│   └── README.md           Python package documentation
+├── examples/               Minimal C usage samples
+├── tests/                  CPU and GPU regression programs
+├── tools/
+│   └── fwht_cli.c          Command-line interface
+└── Makefile                Build orchestration
 ```
 
 ## Support and Licensing
