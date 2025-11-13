@@ -21,7 +21,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  *
- * Version: 1.1.0
+ * Version: 1.1.2
  */
 
 #ifndef FWHT_H
@@ -41,8 +41,8 @@ extern "C" {
 
 #define FWHT_VERSION_MAJOR 1
 #define FWHT_VERSION_MINOR 1
-#define FWHT_VERSION_PATCH 0
-#define FWHT_VERSION "1.1.0"
+#define FWHT_VERSION_PATCH 2
+#define FWHT_VERSION "1.1.2"
 
 /* ============================================================================
  * BACKEND SELECTION
