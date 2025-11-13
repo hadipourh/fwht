@@ -197,30 +197,30 @@ make clean && make bench
 
 Each command samples the same transform sizes reported in the tables below. Adjust `--backend` and the size list as needed for other hardware.
 
-**Apple M4 desktop (macOS 15.7.1)** *(Updated with v1.0.1 optimizations)*
+**Apple M4 desktop (macOS 15.7.1)**
 CPU: Apple M4 (10 physical / 10 logical cores)
 Memory: 24 GiB unified
 
-| Mode                     | Size (points) | Mean (ms) | StdDev (ms) | Notes                                          |
-| :----------------------- | ------------: | --------: | ----------: | :--------------------------------------------- |
-| cpu (single-threaded)    |    16,777,216 |      28.8 |         0.6 | **19% faster** (vs 35.4ms in v1.0.0)           |
-|                          |    33,554,432 |      59.9 |         0.2 | Cache-aligned memory + prefetching             |
-|                          |    67,108,864 |     127.6 |         2.8 | SIMD with restrict optimization                |
-|                          |   134,217,728 |     262.2 |         2.3 |                                                |
-|                          |   268,435,456 |     548.8 |        15.5 |                                                |
-|                          | 1,073,741,824 |   2,499.8 |       205.4 |                                                |
-| openmp (multi-threaded)  |    16,777,216 |      16.0 |         1.4 | **2.7× speedup** (task-based recursion)        |
-|                          |    33,554,432 |      27.9 |         1.1 | **89% better scaling** vs v1.0.0               |
-|                          |    67,108,864 |      57.8 |         6.4 | Depth-limited task parallelism                 |
-|                          |   134,217,728 |     119.3 |         6.5 |                                                |
-|                          |   268,435,456 |     256.7 |        43.7 |                                                |
-|                          | 1,073,741,824 |   1,186.2 |        98.6 |                                                |
-| auto (runtime selection) |    16,777,216 |      18.1 |         4.9 | Selects OpenMP for n ≥ 256                     |
-|                          |    33,554,432 |      31.6 |         6.7 |                                                |
-|                          |    67,108,864 |      61.4 |         6.7 |                                                |
-|                          |   134,217,728 |     124.4 |         7.2 |                                                |
-|                          |   268,435,456 |     273.8 |        11.0 |                                                |
-|                          | 1,073,741,824 |   1,253.4 |        97.5 |                                                |
+| Mode                     | Size (points) | Mean (ms) | StdDev (ms) |
+| :----------------------- | ------------: | --------: | ----------: |
+| cpu (single-threaded)    |    16,777,216 |      28.8 |         0.6 |
+|                          |    33,554,432 |      59.9 |         0.2 |
+|                          |    67,108,864 |     127.6 |         2.8 |
+|                          |   134,217,728 |     262.2 |         2.3 |
+|                          |   268,435,456 |     548.8 |        15.5 |
+|                          | 1,073,741,824 |   2,499.8 |       205.4 |
+| openmp (multi-threaded)  |    16,777,216 |      16.0 |         1.4 |
+|                          |    33,554,432 |      27.9 |         1.1 |
+|                          |    67,108,864 |      57.8 |         6.4 |
+|                          |   134,217,728 |     119.3 |         6.5 |
+|                          |   268,435,456 |     256.7 |        43.7 |
+|                          | 1,073,741,824 |   1,186.2 |        98.6 |
+| auto (runtime selection) |    16,777,216 |      18.1 |         4.9 |
+|                          |    33,554,432 |      31.6 |         6.7 |
+|                          |    67,108,864 |      61.4 |         6.7 |
+|                          |   134,217,728 |     124.4 |         7.2 |
+|                          |   268,435,456 |     273.8 |        11.0 |
+|                          | 1,073,741,824 |   1,253.4 |        97.5 |
 
 **NVIDIA A30 server (Linux 5.14.0-570.49.1.el9_6.x86_64)**
 GPU: NVIDIA A30 (CUDA 13.0 runtime, driver 580.95.05, nvcc 12.6.68)
