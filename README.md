@@ -179,11 +179,6 @@ make openmp bench
     --sizes=16777216,33554432,67108864,134217728,268435456,1073741824 \
     --repeats=10
 
-./build/fwht_bench \
-    --backend=openmp \
-    --sizes=16777216,33554432,67108864,134217728,268435456,1073741824 \
-    --repeats=10
-
 # GPU benchmarks (rebuild with CUDA support first)
 make clean && make bench
 ./build/fwht_bench \
@@ -198,69 +193,74 @@ make clean && make bench
 #### Apple M4 (macOS 15.7.1)
 
 **System Configuration:**
+
 - CPU: Apple M4 (10 cores, ARM NEON)
 - Memory: 24 GB unified
 
-| Mode                     |    Size | Mean (ms) | StdDev (ms) |
-| :----------------------- | ------: | --------: | ----------: |
-| cpu (single-threaded)    |  2^24   |      27.4 |         1.0 |
-|                          |  2^25   |      57.6 |         0.8 |
-|                          |  2^26   |     123.4 |         2.8 |
-|                          |  2^27   |     262.7 |        16.3 |
-|                          |  2^28   |     547.3 |        17.7 |
-|                          |  2^30   |   2,417.8 |       147.4 |
-| openmp (multi-threaded)  |  2^24   |      15.3 |         0.5 |
-|                          |  2^25   |      27.8 |         2.0 |
-|                          |  2^26   |      56.8 |         4.5 |
-|                          |  2^27   |     115.3 |         4.6 |
-|                          |  2^28   |     248.6 |         8.3 |
-|                          |  2^30   |   1,119.7 |        35.9 |
+| Mode                    | Size | Mean (ms) | StdDev (ms) |
+| :---------------------- | ---: | --------: | ----------: |
+| cpu (single-threaded)   | 2^24 |      27.4 |         1.0 |
+|                         | 2^25 |      57.6 |         0.8 |
+|                         | 2^26 |     123.4 |         2.8 |
+|                         | 2^27 |     262.7 |        16.3 |
+|                         | 2^28 |     547.3 |        17.7 |
+|                         | 2^30 |   2,417.8 |       147.4 |
+| openmp (multi-threaded) | 2^24 |      15.3 |         0.5 |
+|                         | 2^25 |      27.8 |         2.0 |
+|                         | 2^26 |      56.8 |         4.5 |
+|                         | 2^27 |     115.3 |         4.6 |
+|                         | 2^28 |     248.6 |         8.3 |
+|                         | 2^30 |   1,119.7 |        35.9 |
 
 #### AMD EPYC 9254 (Linux)
 
 **System Configuration:**
+
 - CPU: AMD EPYC 9254 24-Core Processor (48 threads, x86_64 AVX2)
 - Memory: 377 GB
 
-| Mode                     |    Size | Mean (ms) | StdDev (ms) |
-| :----------------------- | ------: | --------: | ----------: |
-| cpu (single-threaded)    |  2^24   |      56.1 |         0.0 |
-|                          |  2^25   |     116.2 |         0.1 |
-|                          |  2^26   |     240.9 |         0.1 |
-|                          |  2^27   |     589.0 |         0.1 |
-|                          |  2^28   |   1,393.2 |         0.3 |
-|                          |  2^30   |   7,286.1 |         1.1 |
-| openmp (multi-threaded)  |  2^24   |      29.5 |         5.8 |
-|                          |  2^25   |      40.8 |         7.3 |
-|                          |  2^26   |      68.6 |         9.4 |
-|                          |  2^27   |     221.6 |         8.6 |
-|                          |  2^28   |     514.9 |         7.0 |
-|                          |  2^30   |   2,235.8 |       140.0 |
+| Mode                    | Size | Mean (ms) | StdDev (ms) |
+| :---------------------- | ---: | --------: | ----------: |
+| cpu (single-threaded)   | 2^24 |      56.1 |         0.0 |
+|                         | 2^25 |     116.2 |         0.1 |
+|                         | 2^26 |     240.9 |         0.1 |
+|                         | 2^27 |     589.0 |         0.1 |
+|                         | 2^28 |   1,393.2 |         0.3 |
+|                         | 2^30 |   7,286.1 |         1.1 |
+| openmp (multi-threaded) | 2^24 |      29.5 |         5.8 |
+|                         | 2^25 |      40.8 |         7.3 |
+|                         | 2^26 |      68.6 |         9.4 |
+|                         | 2^27 |     221.6 |         8.6 |
+|                         | 2^28 |     514.9 |         7.0 |
+|                         | 2^30 |   2,235.8 |       140.0 |
 
 ### GPU Performance (NVIDIA A30, Linux)
 
 **System Configuration:**
+
 - GPU: NVIDIA A30 (CUDA 13.0 runtime, driver 580.95.05, nvcc 12.6.68)
 - Host CPU: Dual AMD EPYC 9254 (48 hardware threads)
 - System RAM: 377 GB, GPU RAM: 24 GB HBM2
 
-|    Size | Mean (ms) | StdDev (ms) |
-| ------: | --------: | ----------: |
-|  2^24   |      10.7 |         0.0 |
-|  2^25   |      22.8 |         1.0 |
-|  2^26   |      47.3 |         0.1 |
-|  2^27   |      86.9 |         3.5 |
-|  2^28   |     171.9 |         0.1 |
-|  2^30   |     714.6 |         5.6 |
+| Size | Mean (ms) | StdDev (ms) |
+| ---: | --------: | ----------: |
+| 2^24 |      10.7 |         0.0 |
+| 2^25 |      22.8 |         1.0 |
+| 2^26 |      47.3 |         0.1 |
+| 2^27 |      86.9 |         3.5 |
+| 2^28 |     171.9 |         0.1 |
+| 2^30 |     714.6 |         5.6 |
 
 ## Performance Insights
 
 **Memory-Bandwidth Bound Algorithm:**
+
 - FWHT performance depends on memory subsystem bandwidth, not FLOPS
 - Each element is accessed log₂(n) times with irregular stride patterns (low arithmetic intensity)
 - CPU optimizations focus on cache efficiency and SIMD vectorization
 
 **Backend Selection Guidelines:**
+
 - **CPU single-threaded**: Small transforms (n < 1M) or when latency matters
 - **OpenMP multi-threaded**: Medium to large transforms on multi-core systems (near-linear scaling observed)
 - **GPU**: Large single transforms (n ≥ 64M) or batch operations (10+ transforms)
@@ -269,6 +269,7 @@ make clean && make bench
 - **Auto mode**: Let the library choose based on problem size and available hardware
 
 **Numerical Stability:**
+
 - `fwht_i32`: Safe for all n if `|input[i]| ≤ 1`; general rule: `n × max(|input|) < 2^31`
 - `fwht_f64`: Relative error typically `< log₂(n) × 2.22e-16`
 - `fwht_i8`: Only safe for `n ≤ 64` with `|input| = 1` (overflow risk)
