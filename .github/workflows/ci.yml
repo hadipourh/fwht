@@ -18,6 +18,14 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     
+    - name: Install OpenMP (Ubuntu)
+      if: runner.os == 'Linux'
+      run: sudo apt-get update && sudo apt-get install -y libomp-dev
+    
+    - name: Install OpenMP (macOS)
+      if: runner.os == 'macOS'
+      run: brew install libomp
+    
     - name: Build library
       run: make lib
       
@@ -45,6 +53,17 @@ jobs:
       uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
+    
+    - name: Install OpenMP (Ubuntu)
+      if: runner.os == 'Linux'
+      run: sudo apt-get update && sudo apt-get install -y libomp-dev
+    
+    - name: Install OpenMP (macOS)
+      if: runner.os == 'macOS'
+      run: brew install libomp
+    
+    - name: Sync Python sources
+      run: bash tools/sync_python.sh
         
     - name: Install dependencies
       run: |
@@ -67,6 +86,9 @@ jobs:
     
     steps:
     - uses: actions/checkout@v4
+    
+    - name: Install OpenMP
+      run: sudo apt-get update && sudo apt-get install -y libomp-dev
     
     - name: Build with OpenMP
       run: make openmp bench
