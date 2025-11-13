@@ -1,7 +1,6 @@
 # LibFWHT
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-![Version](https://img.shields.io/badge/version-1.1.0-green.svg)
 
 High-performance C99 library for computing the Fast Walsh-Hadamard Transform (FWHT), a fundamental tool in cryptanalysis and Boolean function analysis. The library provides multiple backend implementations (vectorized single-threaded CPU, OpenMP, and CUDA) with automatic selection based on problem size, offering optimal performance across different hardware configurations.
 
@@ -71,10 +70,10 @@ Compile with `gcc example.c -lfwht -lm` (or link directly against `libfwht.a` in
 - `fwht_f64`: in-place transform for `double` data when fractional coefficients matter
   - Relative error typically `< log₂(n) × 2.22e-16` (e.g., `< 2e-15` for n=2^20)
 - `fwht_i8`: in-place transform for `int8_t` data to minimize memory footprint
-  - ⚠️ Only safe for `n ≤ 64` with `|input| = 1` (watch for overflow)
+  - **Note:** Only safe for `n ≤ 64` with `|input| = 1` (watch for overflow)
 - `fwht_i32_backend`, `fwht_f64_backend`: same transforms with explicit backend selection (`AUTO`, `CPU`, `OPENMP`, `GPU`)
 - `fwht_compute_i32`, `fwht_compute_f64`: out-of-place transforms returning cache-aligned memory
-  - ⚠️ **Must use `fwht_free()` instead of `free()` to deallocate results**
+  - **Important:** Must use `fwht_free()` instead of `free()` to deallocate results
 - `fwht_from_bool`: convert a Boolean truth table to signed Walsh coefficients before transforming
 - `fwht_correlations`: normalize Walsh coefficients to per-mask correlation values
 - `fwht_has_gpu`, `fwht_has_openmp`, `fwht_backend_name`: query runtime capabilities and selected backend

@@ -1,11 +1,8 @@
 # pyfwht - Fast Walsh-Hadamard Transform for Python
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-![Version](https://img.shields.io/badge/version-1.1.1-green.svg)
 
 Python bindings for the high-performance libfwht library, providing Fast Walsh-Hadamard Transform with NumPy integration and support for CPU (SIMD), OpenMP, and CUDA backends.
-
-**Latest (v1.1.1)**: Includes recursive task-based OpenMP, software prefetching, cache-aligned memory, and numerical stability improvements for 19-89% performance gains.
 
 ## Features
 
