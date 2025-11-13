@@ -94,6 +94,10 @@ ifeq ($(UNAME_S),Darwin)
         OPENMP_CFLAGS = -Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include
         OPENMP_CXXFLAGS = -Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include
         OPENMP_LDFLAGS = -L/opt/homebrew/opt/libomp/lib -lomp
+        # Apply OpenMP flags by default
+        CFLAGS += $(OPENMP_CFLAGS)
+        CXXFLAGS += $(OPENMP_CXXFLAGS)
+        LDFLAGS += $(OPENMP_LDFLAGS)
     endif
 else ifeq ($(UNAME_S),Linux)
     # Linux
@@ -104,6 +108,10 @@ else ifeq ($(UNAME_S),Linux)
         OPENMP_CFLAGS = -fopenmp
         OPENMP_CXXFLAGS = -fopenmp
         OPENMP_LDFLAGS = -fopenmp
+        # Apply OpenMP flags by default
+        CFLAGS += $(OPENMP_CFLAGS)
+        CXXFLAGS += $(OPENMP_CXXFLAGS)
+        LDFLAGS += $(OPENMP_LDFLAGS)
     endif
 endif
 
@@ -330,19 +338,20 @@ help:
 	@echo ""
 	@echo "Development:"
 	@echo "  debug     - Build with debug symbols"
-	@echo "  openmp    - Build with OpenMP support"
 	@echo "  asan      - Build with address sanitizer"
 	@echo "  format    - Format source code"
 	@echo "  memcheck  - Check for memory leaks"
 	@echo "  info      - Show build configuration"
 	@echo ""
 	@echo "Options:"
-	@echo "  NO_OPENMP=1  - Disable OpenMP support"
+	@echo "  NO_OPENMP=1  - Disable OpenMP support (enabled by default)"
+	@echo "  NO_SIMD=1    - Disable auto SIMD optimization flags"
+	@echo "  NO_CUDA=1    - Disable CUDA support"
 	@echo ""
 	@echo "Examples:"
-	@echo "  make                  # Build and test"
-	@echo "  make openmp          # Build with OpenMP"
-	@echo "  make NO_OPENMP=1     # Build without OpenMP"
-	@echo "  make NO_SIMD=1       # Build without auto SIMD flags"
-	@echo "  make debug           # Debug build"
-	@echo "  sudo make install    # Install library"
+	@echo "  make                  # Build with OpenMP (default)"
+	@echo "  make bench            # Build benchmark tool"
+	@echo "  make NO_OPENMP=1      # Build without OpenMP"
+	@echo "  make NO_SIMD=1        # Build without auto SIMD flags"
+	@echo "  make debug            # Debug build"
+	@echo "  sudo make install     # Install library"
