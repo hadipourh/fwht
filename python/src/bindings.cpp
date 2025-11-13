@@ -15,6 +15,7 @@ extern "C" {
     #include "fwht.h"
 }
 
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -139,9 +140,9 @@ py::array_t<int32_t> py_fwht_compute_i32(py::array_t<int32_t> input) {
     }
     
     // Create NumPy array that owns the data
-    // Use fwht_free for aligned memory deallocation
+    // Use std::free for aligned memory deallocation
     py::capsule free_when_done(result, [](void* p) {
-        fwht_free(p);
+        std::free(p);
     });
     
     return py::array_t<int32_t>(
@@ -167,9 +168,9 @@ py::array_t<double> py_fwht_compute_f64(py::array_t<double> input) {
     }
     
     // Create NumPy array that owns the data
-    // Use fwht_free for aligned memory deallocation
+    // Use std::free for aligned memory deallocation
     py::capsule free_when_done(result, [](void* p) {
-        fwht_free(p);
+        std::free(p);
     });
     
     return py::array_t<double>(
@@ -195,7 +196,7 @@ py::array_t<int32_t> py_fwht_compute_i32_backend(py::array_t<int32_t> input, fwh
     }
     
     py::capsule free_when_done(result, [](void* p) {
-        fwht_free(p);
+        std::free(p);
     });
     
     return py::array_t<int32_t>(
@@ -221,7 +222,7 @@ py::array_t<double> py_fwht_compute_f64_backend(py::array_t<double> input, fwht_
     }
     
     py::capsule free_when_done(result, [](void* p) {
-        fwht_free(p);
+        std::free(p);
     });
     
     return py::array_t<double>(
