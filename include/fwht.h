@@ -21,7 +21,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  *
- * Version: 1.0.0
+ * Version: 1.1.0
  */
 
 #ifndef FWHT_H
