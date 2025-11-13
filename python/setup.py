@@ -86,9 +86,21 @@ include_dirs_list = [str(INCLUDE_DIR)]
 
 # Platform-specific optimizations
 if sys.platform == 'darwin':  # macOS
-    extra_compile_args.extend(['-march=native', '-stdlib=libc++'])
+    # Avoid -march=native on macOS CI runners (causes issues with newer Apple Silicon)
+    # Use -mtune=native for safe optimization without breaking compatibility
+    if os.environ.get('CI'):
+        # On CI, use conservative flags
+        extra_compile_args.append('-mtune=generic')
+    else:
+        # Local builds can use aggressive optimization
+        extra_compile_args.append('-march=native')
+    extra_compile_args.append('-stdlib=libc++')
 elif sys.platform.startswith('linux'):  # Linux
-    extra_compile_args.append('-march=native')
+    # On Linux CI, be conservative with march
+    if os.environ.get('CI'):
+        extra_compile_args.append('-mtune=generic')
+    else:
+        extra_compile_args.append('-march=native')
 
 # OpenMP support
 if openmp_available:
