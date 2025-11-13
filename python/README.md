@@ -239,9 +239,155 @@ fwht.version()               # Get library version
 
 4. **Use `int8` for memory-constrained applications** (but beware overflow for n > 2^7)
 
-## Examples
+## Advanced Examples
 
-See `examples/basic_usage.py` for comprehensive usage demonstrations.
+### Cryptographic Linear Cryptanalysis
+
+Find the best linear approximation of a Boolean function:
+
+```python
+import numpy as np
+import pyfwht as fwht
+
+# S-box or Boolean function (e.g., 4-bit input, 1-bit output)
+# Example: f(x) for x in {0,1}^4
+truth_table = np.array([0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0], dtype=np.uint8)
+
+# Compute Walsh-Hadamard coefficients
+# For signed convention: 0 → +1, 1 → -1
+wht = fwht.from_bool(truth_table, signed=True)
+
+# Find best linear approximation
+n = int(np.log2(len(truth_table)))  # Number of input bits
+best_idx = np.argmax(np.abs(wht))
+best_wht = wht[best_idx]
+
+# Compute correlation: cor(f, ℓ_u) = W_f(u) / 2^n
+correlation = best_wht / (2**n)
+
+# Compute bias: ε = W_f(u) / 2^(n+1)
+bias = best_wht / (2**(n+1))
+
+print(f"Best linear mask u: {best_idx:0{n}b}")
+print(f"WHT coefficient: {best_wht}")
+print(f"Correlation: {correlation:.4f}")
+print(f"Bias: {bias:.4f}")
+print(f"Linear probability: {0.5 + bias:.4f}")
+```
+
+### Batch Processing: Computing Nonlinearity
+
+Analyze cryptographic properties of Boolean functions:
+
+```python
+import numpy as np
+import pyfwht as fwht
+
+# Generate 1000 random Boolean functions
+num_vars = 8  # Number of input variables
+num_functions = 1000
+functions = np.random.randint(0, 2, size=(num_functions, 2**num_vars), dtype=np.uint8)
+
+# Compute nonlinearity for all functions
+nonlinearities = []
+for func in functions:
+    # from_bool computes WHT coefficients with signed convention
+    wht = fwht.from_bool(func, signed=True)
+    
+    # Nonlinearity: NL(f) = 2^(n-1) - (1/2)·max|W_f(u)|
+    # For n-variable function, length of truth table is 2^n
+    max_abs_wht = np.max(np.abs(wht))
+    nl = 2**(num_vars - 1) - max_abs_wht // 2
+    nonlinearities.append(nl)
+
+print(f"Average nonlinearity: {np.mean(nonlinearities):.2f}")
+print(f"Max nonlinearity: {max(nonlinearities)}")
+print(f"Min nonlinearity: {min(nonlinearities)}")
+print(f"Theoretical max for {num_vars}-bit functions: {2**(num_vars-1) - 2**(num_vars//2 - 1)}")
+```
+
+### Performance Comparison: Backend Selection
+
+```python
+import numpy as np
+import pyfwht as fwht
+import time
+
+def benchmark_backends(size):
+    """Compare performance across different backends."""
+    data = np.random.randn(size).astype(np.float64)
+    results = {}
+    
+    backends = [
+        (fwht.Backend.CPU, "CPU (SIMD)"),
+        (fwht.Backend.OPENMP, "OpenMP"),
+    ]
+    
+    if fwht.has_gpu():
+        backends.append((fwht.Backend.GPU, "GPU (CUDA)"))
+    
+    for backend, name in backends:
+        test_data = data.copy()
+        
+        # Warmup
+        fwht.transform(test_data, backend=backend)
+        
+        # Benchmark
+        test_data = data.copy()
+        start = time.perf_counter()
+        fwht.transform(test_data, backend=backend)
+        elapsed = time.perf_counter() - start
+        
+        throughput = (size * fwht.log2(size)) / elapsed / 1e9
+        results[name] = {
+            'time': elapsed * 1000,  # ms
+            'throughput': throughput  # GOps/s
+        }
+    
+    return results
+
+# Test different sizes
+for k in range(20, 26, 2):
+    size = 2**k
+    print(f"\nSize: {size:,} ({k} bits)")
+    results = benchmark_backends(size)
+    
+    for name, metrics in results.items():
+        print(f"  {name:15s}: {metrics['time']:7.2f} ms  "
+              f"({metrics['throughput']:.2f} GOps/s)")
+```
+
+### Numerical Accuracy Validation
+
+```python
+import numpy as np
+import pyfwht as fwht
+
+def test_orthogonality(n):
+    """
+    Verify WHT orthogonality: WHT(WHT(x)) = n * x
+    """
+    x = np.random.randn(n)
+    
+    # Forward transform
+    y = fwht.compute(x)
+    
+    # Inverse transform (forward again, then divide by n)
+    x_reconstructed = fwht.compute(y) / n
+    
+    # Check reconstruction error
+    error = np.linalg.norm(x - x_reconstructed)
+    rel_error = error / np.linalg.norm(x)
+    
+    print(f"Size {n}: Relative error = {rel_error:.2e}")
+    return rel_error < 1e-10
+
+# Test for various sizes
+for k in range(4, 16):
+    assert test_orthogonality(2**k), f"Failed for size 2^{k}"
+
+print("All orthogonality tests passed!")
+```
 
 ## Benchmark Results
 
