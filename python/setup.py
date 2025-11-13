@@ -144,6 +144,7 @@ if cuda_available:
             str(cuda_src),
             '-o', str(cuda_obj),
             f'-I{INCLUDE_DIR}',
+            '-DUSE_CUDA=1',
             '-Xcompiler', '-fPIC',
             '--std=c++11',
             '-O3'
