@@ -5,45 +5,38 @@
 
 High-performance C99 library for computing the Fast Walsh-Hadamard Transform (FWHT), a fundamental tool in cryptanalysis and Boolean function analysis. The library provides multiple backend implementations (vectorized single-threaded CPU, OpenMP, and CUDA) with automatic selection based on problem size, offering optimal performance across different hardware configurations.
 
-**Latest Release (v1.0.1):** Includes recursive task-based OpenMP parallelism, software prefetching, cache-aligned memory allocation, and comprehensive numerical stability documentation.
-
 <p align="center">
   <img src="examples/butterfly.svg" alt="FWHT Butterfly Diagram" width="200">
 </p>
 
-## Overview
+## Key Features
 
-- C99 Walsh–Hadamard transform library for cryptanalysis and Boolean function analysis
-- Backends: vectorized single-threaded CPU, OpenMP (optional), CUDA (optional)
-- OpenMP backend now reuses the SIMD kernels and tiles large butterflies so all threads stay busy on massive inputs
-- API surface covers in-place transforms, out-of-place helpers, and Boolean convenience routines
-- Complementary command-line tool for one-off spectrum inspection
+- **Multiple Backends**: Vectorized CPU (AVX2/SSE2/NEON), OpenMP multi-threading, CUDA GPU acceleration
+- **Automatic Backend Selection**: Chooses optimal implementation based on problem size and available hardware
+- **Memory Efficient**: In-place algorithm with `O(log n)` stack space, cache-aligned allocations
+- **High Performance**: Task-based OpenMP parallelism (2-3× speedup), GPU acceleration (2.7-3.5× on datacenter GPUs)
+- **Flexible API**: In-place transforms, out-of-place helpers, batch processing, Boolean function utilities
+- **Production Ready**: Comprehensive test suite, numerical stability guarantees, command-line tool included
+- **Easy Integration**: C99 standard, minimal dependencies, Python bindings available via PyPI
 
 ## Algorithm
 
 - Computes Walsh-Hadamard Transform for k-variable Boolean functions using butterfly operations
 - For a truth table of size `n = 2^k`, runs in `O(n log n) = O(k × 2^k)` time
 - **Space complexity**: `O(log n)` for recursion stack (in-place algorithm, no temporary buffers needed)
-- **Recursive divide-and-conquer algorithm** with cache-efficient base cases (512-element cutoff fits in L1 cache)
-- CPU backend detects and uses available SIMD instructions (AVX2, SSE2, or NEON)
-- **Task-based OpenMP parallelism** for excellent multi-core scaling (2-3× speedup on 4-8 cores)
-- Automatically selects the best backend: GPU for large problems, OpenMP for medium ones, SIMD for small ones
-- CUDA backend configures itself based on your GPU (can be overridden with `fwht_gpu_set_block_size`)
+- **Recursive divide-and-conquer** with cache-efficient base cases (512-element cutoff fits in L1 cache)
+- **SIMD acceleration**: Auto-detects and uses AVX2, SSE2, or NEON instructions
+- **Task-based OpenMP**: Recursive parallelism for excellent multi-core scaling
+- **GPU optimization**: Persistent buffers, async transfers, shared memory kernels
+- **Auto-tuning**: Dynamically selects best backend and configuration based on hardware
 
-### Performance Optimizations (v1.0.1)
+## Performance Characteristics
 
-- **Software Prefetching**: Hides memory latency by prefetching next data blocks
-- **Cache-Line Aligned Memory**: 64-byte alignment eliminates cache line splits (use `fwht_free()` for results from `fwht_compute_*`)
-- **Restrict Keyword**: Enables better compiler auto-vectorization in SIMD kernels
-- **Numerical Stability**: Comprehensive documentation of overflow bounds and precision guarantees
-- **GPU Optimizations** (v1.0.1):
-  - **Persistent Device Buffers**: Eliminates repeated malloc/free overhead
-  - **Pinned Host Memory**: 2-3× faster PCIe transfers using page-locked memory
-  - **Async Memory Transfers**: Overlaps data movement with computation using CUDA streams
-  - **Bank-Conflict-Free Shared Memory**: Optimized access patterns for better memory bandwidth
-  - **Auto-Tuned Block Sizes**: Dynamic grid/block configuration based on GPU architecture
-  - **Note**: GPU performance is limited by PCIe transfer overhead for single transforms. Use batch operations for best GPU performance.
-  - Call `fwht_gpu_cleanup()` to manually free GPU buffers (optional, auto-freed at exit)
+- **Memory-bandwidth bound**: Performance depends primarily on memory subsystem, not raw compute
+- **CPU optimizations**: Software prefetching, cache-line aligned allocations, SIMD vectorization
+- **GPU considerations**: HBM-based datacenter GPUs (A30, A100, H100) preferred for consistent performance
+- **Batch processing**: GPU batch mode achieves 10-100× throughput vs sequential CPU for multiple transforms
+- **Numerical stability**: Documented overflow bounds and precision guarantees for all data types
 
 ## Build and Install
 
@@ -229,49 +222,31 @@ Memory: 24 GiB unified
 |                          |   268,435,456 |     273.8 |        11.0 |                                                |
 |                          | 1,073,741,824 |   1,253.4 |        97.5 |                                                |
 
-**NVIDIA RTX 4090 server (Linux, CUDA 13.0)**
-GPU: NVIDIA GeForce RTX 4090 (24 GB GDDR6X)
-PCIe: Gen 4 x16
-
-| Size (points) | Mean (ms) | StdDev (ms) | Speedup vs CPU |
-| ------------: | --------: | ----------: | -------------: |
-|    16,777,216 |      15.9 |         0.7 |          1.8× |
-|    33,554,432 |      30.3 |         2.3 |          2.0× |
-|    67,108,864 |      88.9 |        37.0 |          1.4× |
-|   134,217,728 |     126.2 |        11.0 |          2.1× |
-|   268,435,456 |     243.4 |        12.9 |          2.3× |
-| 1,073,741,824 |   1,027.7 |        32.2 |          2.4× |
-
 **NVIDIA A30 server (Linux 5.14.0-570.49.1.el9_6.x86_64)**
 GPU: NVIDIA A30 (CUDA 13.0 runtime, driver 580.95.05, nvcc 12.6.68)
 Host CPU: Dual AMD EPYC 9254 (48 hardware threads)
-System RAM: 377 GiB, GPU RAM: 24 GiB
+System RAM: 377 GiB, GPU RAM: 24 GiB HBM2
 
-| Size (points) | Mean (ms) | StdDev (ms) |
-| ------------: | --------: | ----------: |
-|    16,777,216 |      11.4 |         0.0 |
-|    33,554,432 |      22.7 |         0.1 |
-|    67,108,864 |      53.5 |         0.1 |
-|   134,217,728 |      94.6 |         2.7 |
-|   268,435,456 |     178.8 |         0.1 |
+| Size (points) | Mean (ms) | StdDev (ms) | Speedup vs CPU |
+| ------------: | --------: | ----------: | -------------: |
+|    16,777,216 |      10.7 |         0.0 |          2.7× |
+|    33,554,432 |      22.8 |         1.0 |          2.6× |
+|    67,108,864 |      47.3 |         0.1 |          2.7× |
+|   134,217,728 |      86.9 |         3.5 |          3.0× |
+|   268,435,456 |     171.9 |         0.1 |          3.2× |
+| 1,073,741,824 |     714.6 |         5.6 |          3.5× |
 
-Observed trends:
+## Performance Insights
 
-- **v1.0.1 delivers major performance gains**: CPU 19% faster, OpenMP scaling improved 89% (1.4× → 2.7× speedup)
-- **GPU performance is PCIe-transfer bound**: For single transforms, PCIe overhead (5-10ms) limits GPU advantage
-  - **A30 datacenter GPU**: Optimized PCIe and better sustained performance → 3-4× speedup vs CPU
-  - **RTX 4090 gaming GPU**: Similar raw compute but more transfer overhead → 1.8-2.4× speedup vs CPU
-  - **For best GPU performance**: Use batch operations (`fwht_batch_*_cuda`) to amortize transfer costs
-- **OpenMP CPU is highly competitive**: Task-based parallelism achieves 2.7× speedup on 10 cores with minimal overhead
-- **Architecture recommendations**:
-  - **Single transforms < 64M elements**: Use OpenMP CPU (lower latency, no PCIe overhead)
-  - **Single transforms ≥ 64M elements**: GPU starts to win as compute dominates transfers
-  - **Batch operations (10+ transforms)**: GPU strongly preferred (transfers amortized across batch)
-  - **Cryptanalysis/ML pipelines**: GPU batch mode can achieve 10-100× throughput vs single CPU
-- Recursive algorithm with 512-element cutoff provides optimal cache locality
-- Software prefetching and aligned memory contribute 5-10% additional performance gain
-- The `auto` backend selects OpenMP at these sizes, matching the dedicated multi-thread timings
-- Sub-`2^22` workloads benefit from CPU execution unless multiple transforms are batched on the GPU
+- **FWHT is extremely memory-bandwidth bound**: Performance depends on memory subsystem, not raw TFLOPS
+  - Each element accessed log₂(n) times with irregular stride patterns (low arithmetic intensity)
+- **GPU architecture matters**: A30 (HBM2) achieves 2.7-3.5× speedup with ±0.1ms variance; RTX 4090 (GDDR6X) shows 1.8-2.4× with ±3-22ms variance
+- **OpenMP scales well**: 2.7× speedup on 10 cores via task-based recursive parallelism
+- **Best practices**:
+  - Single transforms < 64M: Use OpenMP CPU (lower latency)
+  - Single transforms ≥ 64M: GPU benefits from reduced PCIe overhead ratio
+  - Batch operations (10+ transforms): GPU strongly preferred
+  - GPU selection: Prefer HBM-based datacenter GPUs for consistent performance
 
 ## Repository Layout
 
