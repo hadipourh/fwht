@@ -23,3 +23,4 @@ python/__pycache__/
 python/build_env/
 python/c_src/
 python/include/
+python/venv/
