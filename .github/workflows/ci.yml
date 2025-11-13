@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  test-cpu:
+    name: Test CPU Backends
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Build library
+      run: make lib
+      
+    - name: Run tests
+      run: make test-cpu
+      
+    - name: Build with OpenMP
+      run: |
+        make clean
+        make openmp
+        make test-cpu
+
+  test-python:
+    name: Test Python Package
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ['3.8', '3.9', '3.10', '3.11', '3.12']
+        
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install numpy pytest build
+        
+    - name: Build and install package
+      run: |
+        cd python
+        pip install -e .
+        
+    - name: Run Python tests
+      run: |
+        cd python/tests
+        pytest -v
+
+  benchmark:
+    name: Performance Benchmark
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Build with OpenMP
+      run: make openmp bench
+      
+    - name: Run benchmark
+      run: |
+        ./build/fwht_bench --backend=cpu --sizes=1024,4096,16384 --repeats=5
+        ./build/fwht_bench --backend=openmp --sizes=1024,4096,16384 --repeats=5
