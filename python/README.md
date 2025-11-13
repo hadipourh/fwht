@@ -26,12 +26,19 @@ Python bindings for the high-performance libfwht library, providing Fast Walsh-H
 - NumPy >= 1.20.0
 - C99 compiler (gcc, clang, msvc)
 - Optional: OpenMP-capable compiler for multi-threading
-- Optional: CUDA toolkit for GPU support
+- Optional: CUDA toolkit (nvcc) for GPU support
 
-### From PyPI (when published)
+### From PyPI
 
 ```bash
+# Install (automatically enables CUDA if nvcc is found)
 pip install pyfwht
+
+# On Linux, you may need to build from source for CUDA support
+pip install pyfwht --no-binary :all:
+
+# Disable CUDA even if available
+USE_CUDA=0 pip install pyfwht --no-binary :all:
 ```
 
 ### From Source
@@ -39,10 +46,11 @@ pip install pyfwht
 ```bash
 git clone https://github.com/hadipourh/fwht
 cd fwht/python
-pip install -e .  # Editable/development install
+pip install -e .  # Auto-detects CUDA if nvcc is available
 
-# Enable CUDA support (experimental)
-USE_CUDA=1 pip install -e .
+# Force CUDA on/off
+USE_CUDA=1 pip install -e .  # Force enable (fails if nvcc not found)
+USE_CUDA=0 pip install -e .  # Force disable
 ```
 
 ## Quick Start
@@ -82,14 +90,17 @@ print(f"Maximum absolute correlation: {max_correlation}")
 # Automatic backend selection (recommended)
 fwht.transform(data)  # or backend=fwht.Backend.AUTO
 
+# Check availability first
+print("OpenMP available:", fwht.has_openmp())
+print("GPU/CUDA available:", fwht.has_gpu())
+
 # Explicit backend
 fwht.transform(data, backend=fwht.Backend.CPU)     # Single-threaded SIMD
 fwht.transform(data, backend=fwht.Backend.OPENMP)  # Multi-threaded
-fwht.transform(data, backend=fwht.Backend.GPU)     # CUDA
 
-# Check availability
-print("OpenMP available:", fwht.has_openmp())
-print("GPU/CUDA available:", fwht.has_gpu())
+# Use GPU only if available
+if fwht.has_gpu():
+    fwht.transform(data, backend=fwht.Backend.GPU)
 ```
 
 ### Efficient Repeated Transforms

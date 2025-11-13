@@ -65,7 +65,15 @@ def has_openmp():
     return False
 
 # Detect features
-cuda_available = has_cuda() and os.environ.get('USE_CUDA', '0') == '1'
+# Auto-enable CUDA if nvcc is available (unless explicitly disabled)
+use_cuda_env = os.environ.get('USE_CUDA', 'auto').lower()
+if use_cuda_env == '0' or use_cuda_env == 'false' or use_cuda_env == 'no':
+    cuda_available = False
+elif use_cuda_env == '1' or use_cuda_env == 'true' or use_cuda_env == 'yes':
+    cuda_available = has_cuda()
+else:  # 'auto' or not set - auto-detect
+    cuda_available = has_cuda()
+
 openmp_available = has_openmp()
 
 print("=" * 70)
