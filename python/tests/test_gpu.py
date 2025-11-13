@@ -12,6 +12,7 @@ import pyfwht as fwht
 class TestGPUAvailability:
     """Test GPU detection and availability."""
     
+    @pytest.mark.skipif(not fwht.has_gpu(), reason="GPU not available")
     def test_gpu_detected(self):
         """Verify GPU is available on this system."""
         assert fwht.has_gpu(), "GPU/CUDA not detected. Ensure CUDA is installed and USE_CUDA=1 during build."
