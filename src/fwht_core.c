@@ -23,12 +23,26 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+/* Feature test macros must be defined before any includes */
+#if !defined(_WIN32) && !defined(__APPLE__) && !defined(__FreeBSD__)
+    #define _ISOC11_SOURCE  /* For aligned_alloc() on Linux */
+#endif
+
 #include "fwht.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <stddef.h>
 #include <stdio.h>
+
+/* Compiler-specific restrict keyword */
+#if defined(__GNUC__) || defined(__clang__)
+#define FWHT_RESTRICT __restrict__
+#elif defined(_MSC_VER)
+#define FWHT_RESTRICT __restrict
+#else
+#define FWHT_RESTRICT
+#endif
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -64,12 +78,6 @@
 #elif defined(__GNUC__)
 #pragma GCC diagnostic pop
 #endif
-#endif
-
-/* Tile size used when slicing OpenMP work inside large butterflies. */
-#ifdef _OPENMP
-#define FWHT_OMP_TILE_I32 256u
-#define FWHT_OMP_TILE_F64 128u
 #endif
 
 static void fwht_print_simd_banner(void) {
@@ -110,7 +118,9 @@ static void fwht_report_simd_mode(void) {
 #endif
 }
 
-static inline void fwht_process_range_i32(int32_t* even, int32_t* odd, size_t count) {
+static inline void fwht_process_range_i32(int32_t* FWHT_RESTRICT even, 
+                                           int32_t* FWHT_RESTRICT odd, 
+                                           size_t count) {
     if (count == 0) {
         return;
     }
@@ -167,11 +177,14 @@ static inline void fwht_process_range_i32(int32_t* even, int32_t* odd, size_t co
     }
 }
 
-static inline void fwht_process_block_i32(int32_t* data, size_t base, size_t h) {
+static inline void fwht_process_block_i32(int32_t* FWHT_RESTRICT data, 
+                                           size_t base, size_t h) {
     fwht_process_range_i32(data + base, data + base + h, h);
 }
 
-static inline void fwht_process_range_f64(double* even, double* odd, size_t count) {
+static inline void fwht_process_range_f64(double* FWHT_RESTRICT even, 
+                                           double* FWHT_RESTRICT odd, 
+                                           size_t count) {
     if (count == 0) {
         return;
     }
@@ -184,49 +197,10 @@ static inline void fwht_process_range_f64(double* even, double* odd, size_t coun
     }
 }
 
-static inline void fwht_process_block_f64(double* data, size_t base, size_t h) {
+static inline void fwht_process_block_f64(double* FWHT_RESTRICT data, 
+                                           size_t base, size_t h) {
     fwht_process_range_f64(data + base, data + base + h, h);
 }
-
-#ifdef _OPENMP
-static inline void fwht_process_segment_i32(int32_t* data,
-                                            size_t base,
-                                            size_t h,
-                                            size_t offset,
-                                            size_t length) {
-    size_t start = base + offset;
-    size_t upper = base + h;
-    if (start >= upper) {
-        return;
-    }
-
-    size_t clipped = length;
-    if (start + clipped > upper) {
-        clipped = upper - start;
-    }
-
-    fwht_process_range_i32(data + start, data + start + h, clipped);
-}
-
-static inline void fwht_process_segment_f64(double* data,
-                                            size_t base,
-                                            size_t h,
-                                            size_t offset,
-                                            size_t length) {
-    size_t start = base + offset;
-    size_t upper = base + h;
-    if (start >= upper) {
-        return;
-    }
-
-    size_t clipped = length;
-    if (start + clipped > upper) {
-        clipped = upper - start;
-    }
-
-    fwht_process_range_f64(data + start, data + start + h, clipped);
-}
-#endif /* _OPENMP */
 
 /* =========================================================================
  * VALIDATION HELPERS
@@ -251,41 +225,138 @@ static fwht_status_t validate_input(const void* data, size_t n) {
  * 2. sboxU library (during development)
  * 3. Self-consistency (WHT(WHT(f)) = n*f property)
  * 
- * Algorithm: Cooley-Tukey butterfly (in-place, decimation-in-frequency)
+ * Algorithm: Recursive divide-and-conquer for cache efficiency
  * Complexity: O(n log n)
- * Memory: O(1) auxiliary space (in-place)
+ * Memory: O(log n) stack space for recursion
+ * 
+ * NUMERICAL CONSIDERATIONS (int32_t):
+ *   - Output range: Each WHT coefficient is bounded by n * max(|input|)
+ *   - Overflow safety: Safe for all n if |input[i]| ≤ 1
+ *   - For general input: safe if n * max(|input[i]|) < 2^31
+ *   - Example: n=32768 (2^15) with |input| ≤ 65536 (2^16) → max output = 2^31 ✓
+ * 
+ * RECOMMENDATIONS:
+ *   - Use int32_t for Boolean functions (values ±1)
+ *   - Use double for large n or when |input| > 1
+ *   - Check: n * max(|input[i]|) < 2147483648 before processing
  * ============================================================================ */
 
-static void fwht_butterfly_i32(int32_t* data, size_t n) {
-    fwht_report_simd_mode();
-    /*
-     * Butterfly algorithm with optional SIMD acceleration.
-     * For each stage h = 1, 2, 4, ..., n/2:
-     *   Process pairs (data[i], data[i+h]) for all applicable i
-     *   Compute: sum = a + b, diff = a - b
-     *   Store: data[i] = sum, data[i+h] = diff
-     */
+/* 
+ * Recursive cutoff for single-threaded CPU.
+ * Same as OpenMP version for consistency.
+ */
+#define FWHT_CPU_RECURSIVE_CUTOFF 512
+
+/*
+ * Base case: iterative FWHT with SIMD for small arrays (fits in L1 cache).
+ * Includes software prefetching to hide memory latency.
+ */
+static void fwht_butterfly_i32_iterative(int32_t* data, size_t n) {
     for (size_t h = 1; h < n; h <<= 1) {
         size_t stride = h << 1;
         for (size_t i = 0; i < n; i += stride) {
+            /* Prefetch next block to hide memory latency */
+            if (i + stride < n) {
+#if defined(__GNUC__) || defined(__clang__)
+                __builtin_prefetch(data + i + stride, 1, 3);
+                __builtin_prefetch(data + i + stride + h, 1, 3);
+#endif
+            }
             fwht_process_block_i32(data, i, h);
         }
     }
+}
+
+/*
+ * Recursive helper for cache-efficient single-threaded FWHT.
+ * Same algorithm as OpenMP version but without task parallelism.
+ */
+static void fwht_butterfly_i32_recursive_cpu(int32_t* data, size_t n) {
+    if (n <= FWHT_CPU_RECURSIVE_CUTOFF) {
+        fwht_butterfly_i32_iterative(data, n);
+        return;
+    }
+    
+    size_t half = n >> 1;
+    
+    /* Recursively transform both halves */
+    fwht_butterfly_i32_recursive_cpu(data, half);
+    fwht_butterfly_i32_recursive_cpu(data + half, half);
+    
+    /* Combine: butterfly between the two halves */
+    fwht_process_block_i32(data, 0, half);
+}
+
+/*
+ * Main entry point for single-threaded CPU FWHT.
+ */
+static void fwht_butterfly_i32(int32_t* data, size_t n) {
+    fwht_report_simd_mode();
+    fwht_butterfly_i32_recursive_cpu(data, n);
 }
 
 /* ============================================================================
  * CORE BUTTERFLY ALGORITHM - DOUBLE
  * 
  * Same algorithm, double precision for numerical applications.
+ * Uses same recursive cache-efficient approach as int32.
+ * 
+ * NUMERICAL CONSIDERATIONS (double):
+ *   - Precision: ~15-16 decimal digits (IEEE 754 double precision)
+ *   - Rounding errors accumulate as O(log₂(n) * ε * ||x||₂)
+ *     where ε ≈ 2.22e-16 (machine epsilon)
+ *   - Relative error: typically < 1e-14 for well-conditioned inputs
+ *   - Involution property: ||WHT(WHT(x))/n - x|| / ||x|| < 1e-13
+ * 
+ * RECOMMENDATIONS:
+ *   - Use double for n > 2^20 or when high precision needed
+ *   - Expected relative error: ~log₂(n) * 1e-16
+ *   - Example: n=1048576 (2^20) → relative error < 2e-15
  * ============================================================================ */
 
-static void fwht_butterfly_f64(double* data, size_t n) {
-    fwht_report_simd_mode();
+/*
+ * Base case: iterative FWHT with SIMD for small arrays.
+ * Includes software prefetching to hide memory latency.
+ */
+static void fwht_butterfly_f64_iterative(double* data, size_t n) {
     for (size_t h = 1; h < n; h <<= 1) {
         for (size_t i = 0; i < n; i += (h << 1)) {
+            /* Prefetch next block to hide memory latency */
+            size_t stride = h << 1;
+            if (i + stride < n) {
+#if defined(__GNUC__) || defined(__clang__)
+                __builtin_prefetch(data + i + stride, 1, 3);
+                __builtin_prefetch(data + i + stride + h, 1, 3);
+#endif
+            }
             fwht_process_block_f64(data, i, h);
         }
     }
+}
+
+/*
+ * Recursive helper for cache-efficient single-threaded FWHT (double).
+ */
+static void fwht_butterfly_f64_recursive_cpu(double* data, size_t n) {
+    if (n <= FWHT_CPU_RECURSIVE_CUTOFF) {
+        fwht_butterfly_f64_iterative(data, n);
+        return;
+    }
+    
+    size_t half = n >> 1;
+    
+    fwht_butterfly_f64_recursive_cpu(data, half);
+    fwht_butterfly_f64_recursive_cpu(data + half, half);
+    
+    fwht_process_block_f64(data, 0, half);
+}
+
+/*
+ * Main entry point for single-threaded CPU FWHT (double).
+ */
+static void fwht_butterfly_f64(double* data, size_t n) {
+    fwht_report_simd_mode();
+    fwht_butterfly_f64_recursive_cpu(data, n);
 }
 
 #ifdef _OPENMP
@@ -293,85 +364,138 @@ static void fwht_butterfly_f64(double* data, size_t n) {
  * OPENMP PARALLEL VARIANTS
  * ========================================================================== */
 
-static void fwht_butterfly_i32_openmp(int32_t* data, size_t n) {
-    if (n < 2) {
-        return;
-    }
+/* 
+ * Recursive cutoff: below this size, use iterative base case.
+ * Tuned for L1 cache (typically 32-64KB).
+ * 512 elements * 4 bytes = 2KB, well within L1 cache.
+ */
+#define FWHT_RECURSIVE_CUTOFF 512
 
-#pragma omp parallel
-    {
-        int threads = omp_get_num_threads();
-        for (size_t h = 1; h < n; h <<= 1) {
-            size_t stride = h << 1;
-            size_t blocks = n / stride;
-            if (blocks >= (size_t)threads) {
-#pragma omp for schedule(static)
-                for (ptrdiff_t block = 0; block < (ptrdiff_t)blocks; ++block) {
-                    size_t base = (size_t)block * stride;
-                    fwht_process_block_i32(data, base, h);
-                }
-            } else {
-                size_t tile = FWHT_OMP_TILE_I32;
-                if (tile > h) {
-                    tile = h;
-                }
-                size_t segments_per_block = (h + tile - 1) / tile;
-                size_t total_segments = blocks * segments_per_block;
-#pragma omp for schedule(static)
-                for (ptrdiff_t seg = 0; seg < (ptrdiff_t)total_segments; ++seg) {
-                    size_t block = (size_t)seg / segments_per_block;
-                    size_t seg_in_block = (size_t)seg % segments_per_block;
-                    size_t offset = seg_in_block * tile;
-                    size_t len = tile;
-                    if (offset + len > h) {
-                        len = h - offset;
-                    }
-                    size_t base = block * stride;
-                    fwht_process_segment_i32(data, base, h, offset, len);
-                }
+/*
+ * Base case for recursion: iterative FWHT with SIMD acceleration.
+ * Processes arrays small enough to fit in L1 cache.
+ * Includes software prefetching to hide memory latency.
+ */
+static void fwht_butterfly_i32_base(int32_t* data, size_t n) {
+    for (size_t h = 1; h < n; h *= 2) {
+        for (size_t i = 0; i < n; i += h * 2) {
+            /* Prefetch next block to hide memory latency */
+            size_t stride = h * 2;
+            if (i + stride < n) {
+#if defined(__GNUC__) || defined(__clang__)
+                __builtin_prefetch(data + i + stride, 1, 3);
+                __builtin_prefetch(data + i + stride + h, 1, 3);
+#endif
             }
+            fwht_process_block_i32(data, i, h);
         }
     }
 }
 
+/*
+ * Recursive helper for OpenMP task-based FWHT.
+ * 
+ * Algorithm:
+ *   1. If n <= cutoff: process iteratively (stays in L1 cache)
+ *   2. Otherwise:
+ *      a. Recursively transform left half  (independent)
+ *      b. Recursively transform right half (independent) 
+ *      c. Combine halves with butterfly operation
+ * 
+ * Depth parameter limits task creation to avoid overhead.
+ * Tasks are only created for depth < 3, giving up to 8 parallel tasks.
+ */
+static void fwht_butterfly_i32_recursive(int32_t* data, size_t n, int depth) {
+    if (n <= FWHT_RECURSIVE_CUTOFF) {
+        fwht_butterfly_i32_base(data, n);
+        return;
+    }
+    
+    size_t half = n >> 1;
+    
+    /* Create tasks for the two independent halves (if not too deep) */
+    #pragma omp task shared(data) if(depth < 3)
+    fwht_butterfly_i32_recursive(data, half, depth + 1);
+    
+    #pragma omp task shared(data) if(depth < 3)
+    fwht_butterfly_i32_recursive(data + half, half, depth + 1);
+    
+    #pragma omp taskwait
+    
+    /* Combine: butterfly between the two halves */
+    fwht_process_block_i32(data, 0, half);
+}
+
+/*
+ * OpenMP entry point using recursive task-based parallelism.
+ * Much better cache locality and scaling than stage-based approach.
+ */
+static void fwht_butterfly_i32_openmp(int32_t* data, size_t n) {
+    if (n < 2) {
+        return;
+    }
+    
+    #pragma omp parallel
+    {
+        #pragma omp single
+        fwht_butterfly_i32_recursive(data, n, 0);
+    }
+}
+
+/*
+ * Base case for recursion: iterative FWHT for double precision.
+ * Includes software prefetching to hide memory latency.
+ */
+static void fwht_butterfly_f64_base(double* data, size_t n) {
+    for (size_t h = 1; h < n; h <<= 1) {
+        for (size_t i = 0; i < n; i += h * 2) {
+            /* Prefetch next block to hide memory latency */
+            size_t stride = h * 2;
+            if (i + stride < n) {
+#if defined(__GNUC__) || defined(__clang__)
+                __builtin_prefetch(data + i + stride, 1, 3);
+                __builtin_prefetch(data + i + stride + h, 1, 3);
+#endif
+            }
+            fwht_process_block_f64(data, i, h);
+        }
+    }
+}
+
+/*
+ * Recursive helper for double precision OpenMP FWHT.
+ */
+static void fwht_butterfly_f64_recursive(double* data, size_t n, int depth) {
+    if (n <= FWHT_RECURSIVE_CUTOFF) {
+        fwht_butterfly_f64_base(data, n);
+        return;
+    }
+    
+    size_t half = n >> 1;
+    
+    #pragma omp task shared(data) if(depth < 3)
+    fwht_butterfly_f64_recursive(data, half, depth + 1);
+    
+    #pragma omp task shared(data) if(depth < 3)
+    fwht_butterfly_f64_recursive(data + half, half, depth + 1);
+    
+    #pragma omp taskwait
+    
+    fwht_process_block_f64(data, 0, half);
+}
+
+/*
+ * OpenMP entry point for double precision using recursive task-based parallelism.
+ */
 static void fwht_butterfly_f64_openmp(double* data, size_t n) {
     if (n < 2) {
         return;
     }
-
-#pragma omp parallel
+    
+    #pragma omp parallel
     {
-        int threads = omp_get_num_threads();
-        for (size_t h = 1; h < n; h <<= 1) {
-            size_t stride = h << 1;
-            size_t blocks = n / stride;
-            if (blocks >= (size_t)threads) {
-#pragma omp for schedule(static)
-                for (ptrdiff_t block = 0; block < (ptrdiff_t)blocks; ++block) {
-                    size_t base = (size_t)block * stride;
-                    fwht_process_block_f64(data, base, h);
-                }
-            } else {
-                size_t tile = FWHT_OMP_TILE_F64;
-                if (tile > h) {
-                    tile = h;
-                }
-                size_t segments_per_block = (h + tile - 1) / tile;
-                size_t total_segments = blocks * segments_per_block;
-#pragma omp for schedule(static)
-                for (ptrdiff_t seg = 0; seg < (ptrdiff_t)total_segments; ++seg) {
-                    size_t block = (size_t)seg / segments_per_block;
-                    size_t seg_in_block = (size_t)seg % segments_per_block;
-                    size_t offset = seg_in_block * tile;
-                    size_t len = tile;
-                    if (offset + len > h) {
-                        len = h - offset;
-                    }
-                    size_t base = block * stride;
-                    fwht_process_segment_f64(data, base, h, offset, len);
-                }
-            }
-        }
+        #pragma omp single
+        fwht_butterfly_f64_recursive(data, n, 0);
     }
 }
 #endif /* _OPENMP */
@@ -380,7 +504,18 @@ static void fwht_butterfly_f64_openmp(double* data, size_t n) {
  * CORE BUTTERFLY ALGORITHM - INT8
  * 
  * Memory-efficient version for small values.
- * WARNING: Overflow possible if n * max(|data[i]|) >= 128
+ * 
+ * OVERFLOW WARNING:
+ *   - Output range: Each coefficient bounded by n * max(|input|)
+ *   - int8_t range: -128 to +127
+ *   - SAFE CONDITIONS: n * max(|input[i]|) ≤ 127
+ *   - Examples:
+ *     * n=128, |input|≤1  → max output = 128  → OVERFLOW! ✗
+ *     * n=64,  |input|≤1  → max output = 64   → Safe ✓
+ *     * n=16,  |input|≤7  → max output = 112  → Safe ✓
+ * 
+ * RECOMMENDATION: Only use for very small arrays (n ≤ 64) with |input| = 1
+ * For general use, prefer int32_t or double.
  * ============================================================================ */
 
 static void fwht_butterfly_i8(int8_t* data, size_t n) {
@@ -517,15 +652,44 @@ fwht_status_t fwht_f64_backend(double* data, size_t n, fwht_backend_t backend) {
 
 /* ============================================================================
  * PUBLIC API - OUT-OF-PLACE TRANSFORMS
+ * 
+ * Allocates cache-aligned memory for optimal performance.
  * ============================================================================ */
+
+/*
+ * Allocate cache-line aligned memory for optimal performance.
+ * Alignment to 64 bytes ensures no cache line splits.
+ */
+static inline void* fwht_aligned_alloc(size_t size) {
+#if defined(_WIN32)
+    return _aligned_malloc(size, 64);
+#elif defined(__APPLE__) || defined(__FreeBSD__)
+    void* ptr = NULL;
+    if (posix_memalign(&ptr, 64, size) != 0) {
+        return NULL;
+    }
+    return ptr;
+#else
+    return aligned_alloc(64, (size + 63) & ~63);
+#endif
+}
+
+static inline void fwht_aligned_free(void* ptr) {
+#if defined(_WIN32)
+    _aligned_free(ptr);
+#else
+    free(ptr);
+#endif
+}
 
 int32_t* fwht_compute_i32(const int32_t* input, size_t n) {
     if (validate_input(input, n) != FWHT_SUCCESS) return NULL;
     
-    int32_t* output = (int32_t*)malloc(n * sizeof(int32_t));
+    size_t bytes = n * sizeof(int32_t);
+    int32_t* output = (int32_t*)fwht_aligned_alloc(bytes);
     if (output == NULL) return NULL;
     
-    memcpy(output, input, n * sizeof(int32_t));
+    memcpy(output, input, bytes);
     fwht_butterfly_i32(output, n);
     
     return output;
@@ -534,10 +698,11 @@ int32_t* fwht_compute_i32(const int32_t* input, size_t n) {
 double* fwht_compute_f64(const double* input, size_t n) {
     if (validate_input(input, n) != FWHT_SUCCESS) return NULL;
     
-    double* output = (double*)malloc(n * sizeof(double));
+    size_t bytes = n * sizeof(double);
+    double* output = (double*)fwht_aligned_alloc(bytes);
     if (output == NULL) return NULL;
     
-    memcpy(output, input, n * sizeof(double));
+    memcpy(output, input, bytes);
     fwht_butterfly_f64(output, n);
     
     return output;
@@ -551,6 +716,14 @@ int32_t* fwht_compute_i32_backend(const int32_t* input, size_t n, fwht_backend_t
 double* fwht_compute_f64_backend(const double* input, size_t n, fwht_backend_t backend) {
     (void)backend;
     return fwht_compute_f64(input, n);
+}
+
+/*
+ * Free memory allocated by fwht_compute_* functions.
+ * Portable wrapper for aligned memory deallocation.
+ */
+void fwht_free(void* ptr) {
+    fwht_aligned_free(ptr);
 }
 
 /* ============================================================================
@@ -588,12 +761,13 @@ fwht_status_t fwht_correlations(const uint8_t* bool_func, double* corr_out, size
     if (corr_out == NULL) return FWHT_ERROR_NULL_POINTER;
     
     /* Convert to signed and compute WHT */
-    int32_t* wht = (int32_t*)malloc(n * sizeof(int32_t));
+    size_t bytes = n * sizeof(int32_t);
+    int32_t* wht = (int32_t*)fwht_aligned_alloc(bytes);
     if (wht == NULL) return FWHT_ERROR_OUT_OF_MEMORY;
     
     status = fwht_from_bool(bool_func, wht, n, true);
     if (status != FWHT_SUCCESS) {
-        free(wht);
+        fwht_aligned_free(wht);
         return status;
     }
     
@@ -603,15 +777,23 @@ fwht_status_t fwht_correlations(const uint8_t* bool_func, double* corr_out, size
         corr_out[i] = (double)wht[i] * n_inv;
     }
     
-    free(wht);
+    fwht_aligned_free(wht);
     return FWHT_SUCCESS;
 }
 
 /* ============================================================================
- * CONTEXT API - STUB IMPLEMENTATION
+ * CONTEXT API
  * 
- * Full implementation will be in fwht_context.c
- * For now, provide minimal stubs.
+ * Provides a stateful API for managing FWHT configurations and batch operations.
+ * The context object encapsulates backend selection, threading, and GPU settings.
+ * 
+ * Batch processing benefits:
+ *   - GPU: Amortizes PCIe transfer overhead by batching all arrays together
+ *   - OpenMP: Parallelizes across batch using thread pool
+ *   - Sequential: Falls back to simple loop for small batches
+ * 
+ * For single transforms, use the simple API (fwht_i32, fwht_f64).
+ * Use contexts for explicit backend control or batch processing.
  * ============================================================================ */
 
 struct fwht_context {
@@ -665,10 +847,81 @@ fwht_status_t fwht_batch_i32(fwht_context_t* ctx, int32_t** data_array,
     if (data_array == NULL) return FWHT_ERROR_NULL_POINTER;
     if (batch_size == 0) return FWHT_ERROR_INVALID_ARGUMENT;
     
-    /* Simple sequential implementation for now */
-    /* GPU version will parallelize this */
     fwht_backend_t backend = (ctx != NULL) ? ctx->config.backend : FWHT_BACKEND_AUTO;
     
+    /* Auto-select backend if needed */
+    if (backend == FWHT_BACKEND_AUTO) {
+        backend = fwht_recommend_backend(n);
+    }
+    
+#ifdef FWHT_ENABLE_CUDA
+    /* GPU batch: copy all arrays to device and process in parallel */
+    if (backend == FWHT_BACKEND_GPU) {
+        /* Allocate contiguous device memory for all arrays */
+        int32_t* d_data = NULL;
+        size_t total_size = n * batch_size;
+        cudaError_t err = cudaMalloc(&d_data, total_size * sizeof(int32_t));
+        if (err != cudaSuccess) {
+            return FWHT_ERROR_CUDA;
+        }
+        
+        /* Copy all arrays to device */
+        for (int i = 0; i < batch_size; ++i) {
+            err = cudaMemcpy(d_data + i * n, data_array[i], 
+                           n * sizeof(int32_t), cudaMemcpyHostToDevice);
+            if (err != cudaSuccess) {
+                cudaFree(d_data);
+                return FWHT_ERROR_CUDA;
+            }
+        }
+        
+        /* Process batch on GPU */
+        fwht_status_t status = fwht_batch_i32_cuda(d_data, n, batch_size);
+        
+        /* Copy results back */
+        if (status == FWHT_SUCCESS) {
+            for (int i = 0; i < batch_size; ++i) {
+                err = cudaMemcpy(data_array[i], d_data + i * n,
+                               n * sizeof(int32_t), cudaMemcpyDeviceToHost);
+                if (err != cudaSuccess) {
+                    status = FWHT_ERROR_CUDA;
+                    break;
+                }
+            }
+        }
+        
+        cudaFree(d_data);
+        return status;
+    }
+#endif
+    
+    /* CPU batch: parallelize with OpenMP if available */
+#ifdef FWHT_ENABLE_OPENMP
+    if (backend == FWHT_BACKEND_OPENMP || batch_size > 4) {
+        int success = 1;
+        fwht_status_t first_error = FWHT_SUCCESS;
+        
+        #pragma omp parallel for if(batch_size > 1)
+        for (int i = 0; i < batch_size; ++i) {
+            if (success) {  /* Skip if another thread failed */
+                fwht_status_t status = fwht_i32_backend(data_array[i], n, backend);
+                if (status != FWHT_SUCCESS) {
+                    #pragma omp critical
+                    {
+                        if (success) {
+                            success = 0;
+                            first_error = status;
+                        }
+                    }
+                }
+            }
+        }
+        
+        return first_error;
+    }
+#endif
+    
+    /* Sequential fallback */
     for (int i = 0; i < batch_size; ++i) {
         fwht_status_t status = fwht_i32_backend(data_array[i], n, backend);
         if (status != FWHT_SUCCESS) return status;
@@ -684,6 +937,79 @@ fwht_status_t fwht_batch_f64(fwht_context_t* ctx, double** data_array,
     
     fwht_backend_t backend = (ctx != NULL) ? ctx->config.backend : FWHT_BACKEND_AUTO;
     
+    /* Auto-select backend if needed */
+    if (backend == FWHT_BACKEND_AUTO) {
+        backend = fwht_recommend_backend(n);
+    }
+    
+#ifdef FWHT_ENABLE_CUDA
+    /* GPU batch: copy all arrays to device and process in parallel */
+    if (backend == FWHT_BACKEND_GPU) {
+        /* Allocate contiguous device memory for all arrays */
+        double* d_data = NULL;
+        size_t total_size = n * batch_size;
+        cudaError_t err = cudaMalloc(&d_data, total_size * sizeof(double));
+        if (err != cudaSuccess) {
+            return FWHT_ERROR_CUDA;
+        }
+        
+        /* Copy all arrays to device */
+        for (int i = 0; i < batch_size; ++i) {
+            err = cudaMemcpy(d_data + i * n, data_array[i], 
+                           n * sizeof(double), cudaMemcpyHostToDevice);
+            if (err != cudaSuccess) {
+                cudaFree(d_data);
+                return FWHT_ERROR_CUDA;
+            }
+        }
+        
+        /* Process batch on GPU */
+        fwht_status_t status = fwht_batch_f64_cuda(d_data, n, batch_size);
+        
+        /* Copy results back */
+        if (status == FWHT_SUCCESS) {
+            for (int i = 0; i < batch_size; ++i) {
+                err = cudaMemcpy(data_array[i], d_data + i * n,
+                               n * sizeof(double), cudaMemcpyDeviceToHost);
+                if (err != cudaSuccess) {
+                    status = FWHT_ERROR_CUDA;
+                    break;
+                }
+            }
+        }
+        
+        cudaFree(d_data);
+        return status;
+    }
+#endif
+    
+    /* CPU batch: parallelize with OpenMP if available */
+#ifdef FWHT_ENABLE_OPENMP
+    if (backend == FWHT_BACKEND_OPENMP || batch_size > 4) {
+        int success = 1;
+        fwht_status_t first_error = FWHT_SUCCESS;
+        
+        #pragma omp parallel for if(batch_size > 1)
+        for (int i = 0; i < batch_size; ++i) {
+            if (success) {  /* Skip if another thread failed */
+                fwht_status_t status = fwht_f64_backend(data_array[i], n, backend);
+                if (status != FWHT_SUCCESS) {
+                    #pragma omp critical
+                    {
+                        if (success) {
+                            success = 0;
+                            first_error = status;
+                        }
+                    }
+                }
+            }
+        }
+        
+        return first_error;
+    }
+#endif
+    
+    /* Sequential fallback */
     for (int i = 0; i < batch_size; ++i) {
         fwht_status_t status = fwht_f64_backend(data_array[i], n, backend);
         if (status != FWHT_SUCCESS) return status;

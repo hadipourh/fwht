@@ -146,6 +146,25 @@ fwht_status_t fwht_gpu_set_block_size(unsigned int block_size);
 unsigned int  fwht_gpu_get_block_size(void);
 
 /*
+ * Lightweight profiling support for the CUDA backend.
+ * Enable to collect host-to-device, kernel, and device-to-host timings.
+ */
+typedef struct fwht_gpu_metrics {
+    double h2d_ms;
+    double kernel_ms;
+    double d2h_ms;
+    size_t n;
+    size_t batch_size;
+    size_t bytes_transferred;
+    int    samples;
+    bool   valid;
+} fwht_gpu_metrics_t;
+
+fwht_status_t fwht_gpu_set_profiling(bool enable);
+bool fwht_gpu_profiling_enabled(void);
+fwht_gpu_metrics_t fwht_gpu_get_last_metrics(void);
+
+/*
  * Batch processing of multiple WHTs on GPU.
  *
  * Parameters:

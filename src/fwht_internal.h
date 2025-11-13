@@ -40,12 +40,6 @@ fwht_status_t fwht_i32_cuda(int32_t* data, size_t n);
 fwht_status_t fwht_f64_cuda(double* data, size_t n);
 fwht_status_t fwht_batch_i32_cuda(int32_t* data, size_t n, size_t batch_size);
 fwht_status_t fwht_batch_f64_cuda(double* data, size_t n, size_t batch_size);
-
-/* CUDA context functions */
-fwht_context_t* fwht_create_context_cuda(size_t max_n, fwht_backend_t backend);
-void fwht_destroy_context_cuda(fwht_context_t* ctx);
-fwht_status_t fwht_transform_i32_cuda(fwht_context_t* ctx, int32_t* data, size_t n);
-fwht_status_t fwht_transform_f64_cuda(fwht_context_t* ctx, double* data, size_t n);
 #endif
 
 #ifdef __cplusplus

@@ -50,6 +50,28 @@ static void fill_random(int32_t* data, size_t n, unsigned int seed) {
     }
 }
 
+#ifdef USE_CUDA
+static int gpu_profile_requested(void) {
+    static int cached = -1;
+    if (cached != -1) {
+        return cached;
+    }
+
+    const char* env = getenv("FWHT_GPU_PROFILE");
+    if (env && env[0] != '\0' && env[0] != '0') {
+        if (fwht_gpu_set_profiling(true) == FWHT_SUCCESS) {
+            cached = 1;
+        } else {
+            fprintf(stderr, "[fwht_bench] Failed to enable GPU profiling; continuing without breakdowns.\n");
+            cached = 0;
+        }
+    } else {
+        cached = 0;
+    }
+    return cached;
+}
+#endif
+
 typedef struct {
     const size_t* sizes;
     size_t count;
@@ -155,16 +177,37 @@ typedef struct {
     double mean_ms;
     double stddev_ms;
     bool   valid;
+    double gpu_h2d_ms;
+    double gpu_kernel_ms;
+    double gpu_d2h_ms;
+    size_t gpu_bytes;
+    size_t gpu_batch;
+    size_t gpu_n;
+    int    gpu_samples;
+    bool   gpu_metrics_valid;
 } bench_result_t;
 
 static bench_result_t measure_backend(const bench_config_t* cfg,
                                       fwht_backend_t backend,
                                       int32_t* data,
                                       size_t n) {
-    bench_result_t result = {0.0, 0.0, false};
+    bench_result_t result = {0.0, 0.0, false, 0.0, 0.0, 0.0, 0u, 0u, 0u, 0, false};
     double mean = 0.0;
     double m2 = 0.0;
     int total_runs = cfg->warmup + cfg->repeats;
+#ifdef USE_CUDA
+    double gpu_h2d_sum = 0.0;
+    double gpu_kernel_sum = 0.0;
+    double gpu_d2h_sum = 0.0;
+    size_t gpu_last_bytes = 0;
+    size_t gpu_last_batch = 0;
+    size_t gpu_last_n = 0;
+    int gpu_samples = 0;
+    int collect_gpu_metrics = 0;
+    if (backend == FWHT_BACKEND_GPU) {
+        collect_gpu_metrics = gpu_profile_requested();
+    }
+#endif
 
     for (int run = 0; run < total_runs; ++run) {
         fill_random(data, n, cfg->seed + (unsigned int)run);
@@ -178,22 +221,46 @@ static bench_result_t measure_backend(const bench_config_t* cfg,
             return result;
         }
 
-        if (run < cfg->warmup) {
-            continue;
+        if (run >= cfg->warmup) {
+            int sample_index = run - cfg->warmup;
+            double elapsed_ms = (end - start) * 1000.0;
+            double delta = elapsed_ms - mean;
+            mean += delta / (double)(sample_index + 1);
+            double delta2 = elapsed_ms - mean;
+            m2 += delta * delta2;
+#ifdef USE_CUDA
+            if (backend == FWHT_BACKEND_GPU && collect_gpu_metrics) {
+                fwht_gpu_metrics_t metrics = fwht_gpu_get_last_metrics();
+                if (metrics.valid) {
+                    gpu_h2d_sum += metrics.h2d_ms;
+                    gpu_kernel_sum += metrics.kernel_ms;
+                    gpu_d2h_sum += metrics.d2h_ms;
+                    gpu_last_bytes = metrics.bytes_transferred;
+                    gpu_last_batch = metrics.batch_size;
+                    gpu_last_n = metrics.n;
+                    gpu_samples += 1;
+                }
+            }
+#endif
         }
-
-        int sample_index = run - cfg->warmup;
-        double elapsed_ms = (end - start) * 1000.0;
-        double delta = elapsed_ms - mean;
-        mean += delta / (double)(sample_index + 1);
-        double delta2 = elapsed_ms - mean;
-        m2 += delta * delta2;
     }
 
     double variance = (cfg->repeats > 1) ? (m2 / (double)(cfg->repeats - 1)) : 0.0;
     result.mean_ms = mean;
     result.stddev_ms = (variance > 0.0) ? sqrt(variance) : 0.0;
     result.valid = true;
+#ifdef USE_CUDA
+    if (gpu_samples > 0) {
+        result.gpu_h2d_ms = gpu_h2d_sum / (double)gpu_samples;
+        result.gpu_kernel_ms = gpu_kernel_sum / (double)gpu_samples;
+        result.gpu_d2h_ms = gpu_d2h_sum / (double)gpu_samples;
+        result.gpu_bytes = gpu_last_bytes;
+        result.gpu_batch = gpu_last_batch;
+        result.gpu_n = gpu_last_n;
+        result.gpu_samples = gpu_samples;
+        result.gpu_metrics_valid = true;
+    }
+#endif
     return result;
 }
 
@@ -215,7 +282,18 @@ static int benchmark_backend_mode(const bench_config_t* cfg,
             return -1;
         }
 
-        printf("%10zu  %12.3f  %12.3f\n", n, res.mean_ms, res.stddev_ms);
+    printf("%10zu  %12.3f  %12.3f\n", n, res.mean_ms, res.stddev_ms);
+#ifdef USE_CUDA
+    if (backend == FWHT_BACKEND_GPU && res.gpu_metrics_valid) {
+        printf("            [GPU breakdown] H2D %.3f ms | Kernel %.3f ms | D2H %.3f ms"
+           " (batch=%zu, bytes=%zu)\n",
+           res.gpu_h2d_ms,
+           res.gpu_kernel_ms,
+           res.gpu_d2h_ms,
+           res.gpu_batch,
+           res.gpu_bytes);
+    }
+#endif
     }
 
     printf("\n");

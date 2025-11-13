@@ -41,6 +41,8 @@ static fwht_cuda_device_state g_cuda_device_state = {{}, false};
 
 /* Global configuration: stage kernel block size (0 => auto) */
 static unsigned int g_fwht_block_override = 0;
+static bool g_fwht_profiling_enabled = false;
+static fwht_gpu_metrics_t g_fwht_last_metrics = {0.0, 0.0, 0.0, 0u, 0u, 0u, 0, false};
 
 static fwht_status_t fwht_cuda_report(cudaError_t err, const char* file, int line) {
     fprintf(stderr, "CUDA error at %s:%d: %s\n", file, line, cudaGetErrorString(err));
@@ -268,10 +270,10 @@ static unsigned int fwht_effective_block_size(size_t pairs_per_transform) {
 }
 
 template <typename T>
-static fwht_status_t fwht_launch_small(T* d_data, size_t n, size_t batch_size);
+static fwht_status_t fwht_launch_small(T* d_data, size_t n, size_t batch_size, cudaStream_t stream);
 
 template <>
-fwht_status_t fwht_launch_small<int32_t>(int32_t* d_data, size_t n, size_t batch_size) {
+fwht_status_t fwht_launch_small<int32_t>(int32_t* d_data, size_t n, size_t batch_size, cudaStream_t stream) {
     unsigned int max_threads = fwht_cuda_max_threads_per_block();
     if (n > max_threads) {
         return FWHT_ERROR_INVALID_SIZE;
@@ -284,17 +286,15 @@ fwht_status_t fwht_launch_small<int32_t>(int32_t* d_data, size_t n, size_t batch
         unsigned int current = (batch_size - processed > CUDA_BATCH_LIMIT)
                                ? CUDA_BATCH_LIMIT
                                : static_cast<unsigned int>(batch_size - processed);
-        fwht_kernel_i32<<<current, threads, shared_bytes>>>(d_data + processed * n, static_cast<int>(n));
+    fwht_kernel_i32<<<current, threads, shared_bytes, stream>>>(d_data + processed * n, static_cast<int>(n));
         CUDA_CHECK(cudaGetLastError());
         processed += current;
     }
-
-    CUDA_CHECK(cudaDeviceSynchronize());
     return FWHT_SUCCESS;
 }
 
 template <>
-fwht_status_t fwht_launch_small<double>(double* d_data, size_t n, size_t batch_size) {
+fwht_status_t fwht_launch_small<double>(double* d_data, size_t n, size_t batch_size, cudaStream_t stream) {
     unsigned int max_threads = fwht_cuda_max_threads_per_block();
     if (n > max_threads) {
         return FWHT_ERROR_INVALID_SIZE;
@@ -307,17 +307,15 @@ fwht_status_t fwht_launch_small<double>(double* d_data, size_t n, size_t batch_s
         unsigned int current = (batch_size - processed > CUDA_BATCH_LIMIT)
                                ? CUDA_BATCH_LIMIT
                                : static_cast<unsigned int>(batch_size - processed);
-        fwht_kernel_f64<<<current, threads, shared_bytes>>>(d_data + processed * n, static_cast<int>(n));
+        fwht_kernel_f64<<<current, threads, shared_bytes, stream>>>(d_data + processed * n, static_cast<int>(n));
         CUDA_CHECK(cudaGetLastError());
         processed += current;
     }
-
-    CUDA_CHECK(cudaDeviceSynchronize());
     return FWHT_SUCCESS;
 }
 
 template <typename T>
-static fwht_status_t fwht_launch_large(T* d_data, size_t n, size_t batch_size) {
+static fwht_status_t fwht_launch_large(T* d_data, size_t n, size_t batch_size, cudaStream_t stream) {
     size_t pairs_per_transform = n >> 1;
     unsigned int threads = fwht_effective_block_size(pairs_per_transform);
     unsigned long long work_items = pairs_per_transform;
@@ -366,17 +364,15 @@ static fwht_status_t fwht_launch_large(T* d_data, size_t n, size_t batch_size) {
                                    ? CUDA_BATCH_LIMIT
                                    : static_cast<unsigned int>(batch_size - processed);
             dim3 grid(blocks_x, current);
-            fwht_stage_kernel<T><<<grid, threads>>>(d_data + processed * n,
-                                                    n,
-                                                    h,
-                                                    pairs_per_transform,
-                                                    current);
+            fwht_stage_kernel<T><<<grid, threads, 0, stream>>>(d_data + processed * n,
+                                                               n,
+                                                               h,
+                                                               pairs_per_transform,
+                                                               current);
             CUDA_CHECK(cudaGetLastError());
             processed += current;
         }
     }
-
-    CUDA_CHECK(cudaDeviceSynchronize());
     return FWHT_SUCCESS;
 }
 
@@ -385,6 +381,9 @@ static fwht_status_t fwht_execute_cuda(T* data, size_t n, size_t batch_size) {
     if (batch_size == 0) {
         return FWHT_ERROR_INVALID_ARGUMENT;
     }
+
+    g_fwht_last_metrics.valid = false;
+    g_fwht_last_metrics.samples = 0;
 
     fwht_status_t init_status = fwht_cuda_ensure_device_state();
     if (init_status != FWHT_SUCCESS) {
@@ -402,41 +401,125 @@ static fwht_status_t fwht_execute_cuda(T* data, size_t n, size_t batch_size) {
     size_t bytes = element_count * sizeof(T);
 
     T* d_data = NULL;
-    fwht_status_t status = FWHT_SUCCESS;
-
     cudaError_t err = cudaMalloc(reinterpret_cast<void**>(&d_data), bytes);
     if (err != cudaSuccess) {
         return fwht_cuda_report(err, __FILE__, __LINE__);
     }
 
-    err = cudaMemcpy(d_data, data, bytes, cudaMemcpyHostToDevice);
+    cudaStream_t stream = 0;
+    bool stream_created = false;
+    err = cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
+    if (err == cudaSuccess) {
+        stream_created = true;
+    } else {
+        stream = 0;
+        (void)cudaGetLastError();
+    }
+
+    bool profiling = g_fwht_profiling_enabled && stream_created;
+    cudaEvent_t evt_h2d_start = NULL;
+    cudaEvent_t evt_h2d_end = NULL;
+    cudaEvent_t evt_kernel_end = NULL;
+    cudaEvent_t evt_d2h_end = NULL;
+
+    if (profiling) {
+        if (cudaEventCreateWithFlags(&evt_h2d_start, cudaEventDefault) != cudaSuccess ||
+            cudaEventCreateWithFlags(&evt_h2d_end, cudaEventDefault) != cudaSuccess ||
+            cudaEventCreateWithFlags(&evt_kernel_end, cudaEventDefault) != cudaSuccess ||
+            cudaEventCreateWithFlags(&evt_d2h_end, cudaEventDefault) != cudaSuccess) {
+            profiling = false;
+            if (evt_h2d_start) cudaEventDestroy(evt_h2d_start);
+            if (evt_h2d_end) cudaEventDestroy(evt_h2d_end);
+            if (evt_kernel_end) cudaEventDestroy(evt_kernel_end);
+            if (evt_d2h_end) cudaEventDestroy(evt_d2h_end);
+            evt_h2d_start = evt_h2d_end = evt_kernel_end = evt_d2h_end = NULL;
+        }
+    }
+
+    fwht_status_t status = FWHT_SUCCESS;
+    if (profiling) {
+        (void)cudaEventRecord(evt_h2d_start, stream);
+    }
+
+    err = cudaMemcpyAsync(d_data, data, bytes, cudaMemcpyHostToDevice, stream);
     if (err != cudaSuccess) {
         status = fwht_cuda_report(err, __FILE__, __LINE__);
         goto cleanup;
     }
 
+    if (profiling) {
+        (void)cudaEventRecord(evt_h2d_end, stream);
+    }
+
     if (n <= fwht_cuda_max_threads_per_block()) {
-        status = fwht_launch_small<T>(d_data, n, batch_size);
+        status = fwht_launch_small<T>(d_data, n, batch_size, stream);
     } else {
-        status = fwht_launch_large<T>(d_data, n, batch_size);
+        status = fwht_launch_large<T>(d_data, n, batch_size, stream);
     }
 
     if (status != FWHT_SUCCESS) {
         goto cleanup;
     }
 
-    err = cudaMemcpy(data, d_data, bytes, cudaMemcpyDeviceToHost);
+    if (profiling) {
+        (void)cudaEventRecord(evt_kernel_end, stream);
+    }
+
+    err = cudaMemcpyAsync(data, d_data, bytes, cudaMemcpyDeviceToHost, stream);
     if (err != cudaSuccess) {
         status = fwht_cuda_report(err, __FILE__, __LINE__);
         goto cleanup;
     }
 
+    if (profiling) {
+        (void)cudaEventRecord(evt_d2h_end, stream);
+    }
+
+    err = cudaStreamSynchronize(stream);
+    if (err != cudaSuccess) {
+        status = fwht_cuda_report(err, __FILE__, __LINE__);
+        goto cleanup;
+    }
+
+    if (profiling) {
+        float h2d_ms = 0.0f;
+        float kernel_ms = 0.0f;
+        float d2h_ms = 0.0f;
+    cudaEventElapsedTime(&h2d_ms, evt_h2d_start, evt_h2d_end);
+    cudaEventElapsedTime(&kernel_ms, evt_h2d_end, evt_kernel_end);
+    cudaEventElapsedTime(&d2h_ms, evt_kernel_end, evt_d2h_end);
+        g_fwht_last_metrics.h2d_ms = static_cast<double>(h2d_ms);
+        g_fwht_last_metrics.kernel_ms = static_cast<double>(kernel_ms);
+        g_fwht_last_metrics.d2h_ms = static_cast<double>(d2h_ms);
+        g_fwht_last_metrics.n = n;
+        g_fwht_last_metrics.batch_size = batch_size;
+        g_fwht_last_metrics.bytes_transferred = bytes;
+        g_fwht_last_metrics.samples = 1;
+        g_fwht_last_metrics.valid = true;
+    }
+
 cleanup:
+    if (profiling) {
+        if (evt_h2d_start) cudaEventDestroy(evt_h2d_start);
+        if (evt_h2d_end) cudaEventDestroy(evt_h2d_end);
+        if (evt_kernel_end) cudaEventDestroy(evt_kernel_end);
+        if (evt_d2h_end) cudaEventDestroy(evt_d2h_end);
+    }
+
+    if (stream_created) {
+        cudaStreamDestroy(stream);
+    }
+
     if (d_data != NULL) {
         cudaError_t free_err = cudaFree(d_data);
         if (free_err != cudaSuccess && status == FWHT_SUCCESS) {
             status = fwht_cuda_report(free_err, __FILE__, __LINE__);
         }
+    }
+
+    if (status != FWHT_SUCCESS) {
+        g_fwht_last_metrics.valid = false;
+        g_fwht_last_metrics.samples = 0;
     }
 
     return status;
@@ -469,6 +552,23 @@ fwht_status_t fwht_gpu_set_block_size(unsigned int block_size) {
 
 unsigned int fwht_gpu_get_block_size(void) {
     return g_fwht_block_override;
+}
+
+fwht_status_t fwht_gpu_set_profiling(bool enable) {
+    g_fwht_profiling_enabled = enable;
+    if (!enable) {
+        g_fwht_last_metrics.valid = false;
+        g_fwht_last_metrics.samples = 0;
+    }
+    return FWHT_SUCCESS;
+}
+
+bool fwht_gpu_profiling_enabled(void) {
+    return g_fwht_profiling_enabled;
+}
+
+fwht_gpu_metrics_t fwht_gpu_get_last_metrics(void) {
+    return g_fwht_last_metrics;
 }
 
 fwht_status_t fwht_i32_cuda(int32_t* data, size_t n) {

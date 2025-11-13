@@ -23,15 +23,20 @@
 # ============================================================================
 
 CC = gcc
+CXX = g++
 NVCC = nvcc
 BASE_CFLAGS = -std=c99 -O3 -Wall -Wextra -pedantic -pthread -I$(INCLUDE_DIR)
 CFLAGS = $(BASE_CFLAGS)
+BASE_CXXFLAGS = -O3 -Wall -Wextra -pedantic -pthread -I$(INCLUDE_DIR)
+CXXFLAGS = $(BASE_CXXFLAGS)
 ifeq ($(NO_SIMD),1)
 	CFLAGS +=
+	CXXFLAGS +=
 else
 	CFLAGS += -march=native
+	CXXFLAGS += -march=native
 endif
-NVCCFLAGS = -O3 -I$(INCLUDE_DIR) --compiler-options -fPIC
+NVCCFLAGS = -O3 -I$(INCLUDE_DIR) --compiler-options -fPIC -std=c++14
 LDFLAGS =
 
 # Directories
@@ -87,6 +92,7 @@ ifeq ($(UNAME_S),Darwin)
     # OpenMP on macOS (Homebrew)
     ifneq ($(NO_OPENMP),1)
         OPENMP_CFLAGS = -Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include
+        OPENMP_CXXFLAGS = -Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include
         OPENMP_LDFLAGS = -L/opt/homebrew/opt/libomp/lib -lomp
     endif
 else ifeq ($(UNAME_S),Linux)
@@ -96,6 +102,7 @@ else ifeq ($(UNAME_S),Linux)
     # OpenMP on Linux
     ifneq ($(NO_OPENMP),1)
         OPENMP_CFLAGS = -fopenmp
+        OPENMP_CXXFLAGS = -fopenmp
         OPENMP_LDFLAGS = -fopenmp
     endif
 endif
@@ -105,6 +112,7 @@ ifeq ($(HAS_CUDA),1)
     ifndef NO_CUDA
         USE_CUDA = 1
         CFLAGS += -DUSE_CUDA
+        CXXFLAGS += -DUSE_CUDA
 		NVCCFLAGS += -DUSE_CUDA
         CUDA_LDFLAGS = -L/usr/local/cuda/lib64 -lcudart
         # Try to detect CUDA path
@@ -182,16 +190,16 @@ $(BUILD_DIR)/%.o: $(TEST_DIR)/%.c
 test: directories $(STATIC_LIB) $(TEST_OBJS)
 	@echo "Building test suite..."
 ifeq ($(USE_CUDA),1)
-	$(CC) $(TEST_OBJS) $(CUDA_OBJS) -L$(LIB_DIR) -lfwht $(CUDA_LDFLAGS) -o $(TEST_BIN) $(LDFLAGS) -lm -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
+	$(CXX) $(CXXFLAGS) $(TEST_OBJS) $(CUDA_OBJS) -L$(LIB_DIR) -lfwht $(CUDA_LDFLAGS) -o $(TEST_BIN) $(LDFLAGS) -lm -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
 else
-	$(CC) $(TEST_OBJS) -L$(LIB_DIR) -lfwht -o $(TEST_BIN) $(LDFLAGS) -lm -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
+	$(CC) $(CFLAGS) $(TEST_OBJS) -L$(LIB_DIR) -lfwht -o $(TEST_BIN) $(LDFLAGS) -lm -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
 endif
 	@echo "Running CPU tests..."
 	@$(TEST_BIN)
 ifeq ($(USE_CUDA),1)
 	@echo ""
 	@echo "Building GPU test suite..."
-	$(CC) $(CFLAGS) $(TEST_DIR)/test_gpu.c $(CUDA_OBJS) -L$(LIB_DIR) -lfwht $(CUDA_LDFLAGS) -o $(BUILD_DIR)/test_gpu -lm -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
+	$(CXX) $(CXXFLAGS) $(TEST_DIR)/test_gpu.c $(CUDA_OBJS) -L$(LIB_DIR) -lfwht $(CUDA_LDFLAGS) -o $(BUILD_DIR)/test_gpu -lm -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
 	@echo "Running GPU tests..."
 	@$(BUILD_DIR)/test_gpu
 endif
@@ -200,7 +208,7 @@ endif
 bench: directories $(STATIC_LIB)
 ifeq ($(USE_CUDA),1)
 	@echo "Building benchmark (CUDA enabled)..."
-	$(CC) $(CFLAGS) $(BENCH_DIR)/fwht_bench.c -L$(LIB_DIR) -lfwht $(CUDA_LDFLAGS) -lm -o $(BUILD_DIR)/fwht_bench -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
+	$(CXX) $(CXXFLAGS) $(BENCH_DIR)/fwht_bench.c -L$(LIB_DIR) -lfwht $(CUDA_LDFLAGS) -lm -o $(BUILD_DIR)/fwht_bench -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
 else
 	@echo "Building benchmark..."
 	$(CC) $(CFLAGS) $(BENCH_DIR)/fwht_bench.c -L$(LIB_DIR) -lfwht -lm -o $(BUILD_DIR)/fwht_bench -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
@@ -219,7 +227,7 @@ $(EXAMPLE_BIN): $(EXAMPLE_SRC) $(STATIC_LIB)
 test-gpu: lib
 ifeq ($(USE_CUDA),1)
 	@echo "Building GPU test suite..."
-	$(CC) $(CFLAGS) $(TEST_DIR)/test_gpu.c $(CUDA_OBJS) -L$(LIB_DIR) -lfwht $(CUDA_LDFLAGS) -o $(BUILD_DIR)/test_gpu -lm -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
+	$(CXX) $(CXXFLAGS) $(TEST_DIR)/test_gpu.c $(CUDA_OBJS) -L$(LIB_DIR) -lfwht $(CUDA_LDFLAGS) -o $(BUILD_DIR)/test_gpu -lm -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
 	@echo "Running GPU tests..."
 	@$(BUILD_DIR)/test_gpu
 else
@@ -230,9 +238,9 @@ endif
 test-cpu: directories $(STATIC_LIB) $(TEST_OBJS)
 	@echo "Building CPU test suite..."
 ifeq ($(USE_CUDA),1)
-	$(CC) $(TEST_OBJS) -L$(LIB_DIR) -lfwht $(CUDA_LDFLAGS) -o $(TEST_BIN) $(LDFLAGS) -lm -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
+	$(CXX) $(CXXFLAGS) $(TEST_OBJS) -L$(LIB_DIR) -lfwht $(CUDA_LDFLAGS) -o $(TEST_BIN) $(LDFLAGS) -lm -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
 else
-	$(CC) $(TEST_OBJS) -L$(LIB_DIR) -lfwht -o $(TEST_BIN) $(LDFLAGS) -lm -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
+	$(CC) $(CFLAGS) $(TEST_OBJS) -L$(LIB_DIR) -lfwht -o $(TEST_BIN) $(LDFLAGS) -lm -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
 endif
 	@echo "Running CPU tests..."
 	@$(TEST_BIN)
@@ -268,15 +276,18 @@ uninstall:
 
 # Build with debug symbols
 debug: CFLAGS += -g -O0 -DDEBUG
+debug: CXXFLAGS += -g -O0 -DDEBUG
 debug: all
 
 # Build with OpenMP support
 openmp: CFLAGS += $(OPENMP_CFLAGS)
+openmp: CXXFLAGS += $(OPENMP_CXXFLAGS)
 openmp: LDFLAGS += $(OPENMP_LDFLAGS)
 openmp: all
 
 # Build with address sanitizer (debugging)
 asan: CFLAGS += -fsanitize=address -g
+asan: CXXFLAGS += -fsanitize=address -g
 asan: LDFLAGS += -fsanitize=address
 asan: all
 
