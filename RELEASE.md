@@ -3,14 +3,15 @@
 ## Pre-Release Steps
 
 ### 1. Update Version Numbers
-- [x] `python/pyfwht/_version.py` → 1.0.1
-- [x] `README.md` badge → 1.0.1
-- [ ] `include/fwht.h` → Update `FWHT_VERSION_*` macros if needed
+- [x] `python/pyfwht/_version.py` → 1.1.0
+- [x] `python/pyproject.toml` → 1.1.0
+- [x] `README.md` badge → 1.1.0
+- [x] `include/fwht.h` → Update `FWHT_VERSION_*` macros (1.1.0)
 
 ### 2. Verify Documentation
 - [x] README.md updated with latest benchmarks
-- [x] Key features clearly documented
-- [x] Performance insights documented
+- [x] Benchmark tables restructured for clarity
+- [x] Performance claims updated
 - [ ] Python README synced if needed
 
 ### 3. Testing
@@ -20,7 +21,7 @@
 - [ ] Check GitHub Actions CI passes
 
 ### 4. Clean Repository
-- [x] All changes committed
+- [ ] All changes committed
 - [ ] No uncommitted files
 - [ ] Git status clean
 
@@ -33,8 +34,8 @@ git push origin main
 
 # 2. Create a new release on GitHub
 # - Go to: https://github.com/hadipourh/fwht/releases/new
-# - Tag: v1.0.1
-# - Title: Version 1.0.1
+# - Tag: v1.1.0
+# - Title: Version 1.1.0
 # - Description: See CHANGELOG below
 # - Publish release
 
@@ -73,29 +74,30 @@ git push origin main
 # - Choose TestPyPI or PyPI
 ```
 
-## CHANGELOG for v1.0.1
+## CHANGELOG for v1.1.0
 
 ### Highlights
-- Enhanced README with memory-bandwidth analysis
-- Updated benchmarks with A30 datacenter GPU results
-- Clarified performance characteristics and architecture recommendations
-- Python package synced with C library
+- Restructured benchmark documentation for clarity
+- Separated CPU (macOS M4) and GPU (Linux A30) results
+- Removed misleading cross-platform performance comparisons
+- Updated version to 1.1.0 across all components
 
-### Performance Insights
-- Documented memory-bound nature of FWHT algorithm
-- A30 GPU achieves 2.7-3.5× speedup with excellent consistency
-- OpenMP multi-threading: 2.7× speedup on 10 cores
+### Documentation Improvements
+- CPU benchmarks now clearly separated by platform
+- GPU results presented independently without CPU comparison
+- Performance insights refined to avoid platform-specific claims
+- Clearer guidance on when to use CPU vs GPU backends
 
-### Documentation
-- Cleaner feature-focused README
-- Removed version-specific implementation details
-- Added GPU architecture comparison (HBM vs GDDR6X)
+### Technical Changes
+- Version bumped to 1.1.0 in all components
+- No functional changes to library code
+- Improved reproducibility documentation for benchmarks
 
 ## Post-Release
 
 ### 1. Verify PyPI Publication
 - [ ] Check https://pypi.org/project/pyfwht/
-- [ ] Test installation: `pip install pyfwht==1.0.1`
+- [ ] Test installation: `pip install pyfwht==1.1.0`
 - [ ] Verify package metadata
 
 ### 2. Update Documentation
@@ -104,8 +106,8 @@ git push origin main
 
 ### 3. Tag Repository
 ```bash
-git tag -a v1.0.1 -m "Release version 1.0.1"
-git push origin v1.0.1
+git tag -a v1.1.0 -m "Release version 1.1.0"
+git push origin v1.1.0
 ```
 
 ## PyPI Trusted Publisher Setup (One-time)

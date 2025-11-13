@@ -1,7 +1,7 @@
 # LibFWHT
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-![Version](https://img.shields.io/badge/version-1.0.1-green.svg)
+![Version](https://img.shields.io/badge/version-1.1.0-green.svg)
 
 High-performance C99 library for computing the Fast Walsh-Hadamard Transform (FWHT), a fundamental tool in cryptanalysis and Boolean function analysis. The library provides multiple backend implementations (vectorized single-threaded CPU, OpenMP, and CUDA) with automatic selection based on problem size, offering optimal performance across different hardware configurations.
 
@@ -14,29 +14,23 @@ High-performance C99 library for computing the Fast Walsh-Hadamard Transform (FW
 - **Multiple Backends**: Vectorized CPU (AVX2/SSE2/NEON), OpenMP multi-threading, CUDA GPU acceleration
 - **Automatic Backend Selection**: Chooses optimal implementation based on problem size and available hardware
 - **Memory Efficient**: In-place algorithm with `O(log n)` stack space, cache-aligned allocations
-- **High Performance**: Task-based OpenMP parallelism (2-3× speedup), GPU acceleration (2.7-3.5× on datacenter GPUs)
+- **High Performance**: Task-based OpenMP parallelism, GPU acceleration for large transforms and batch processing
 - **Flexible API**: In-place transforms, out-of-place helpers, batch processing, Boolean function utilities
 - **Production Ready**: Comprehensive test suite, numerical stability guarantees, command-line tool included
 - **Easy Integration**: C99 standard, minimal dependencies, Python bindings available via PyPI
 
 ## Algorithm
 
-- Computes Walsh-Hadamard Transform for k-variable Boolean functions using butterfly operations
-- For a truth table of size `n = 2^k`, runs in `O(n log n) = O(k × 2^k)` time
-- **Space complexity**: `O(log n)` for recursion stack (in-place algorithm, no temporary buffers needed)
-- **Recursive divide-and-conquer** with cache-efficient base cases (512-element cutoff fits in L1 cache)
-- **SIMD acceleration**: Auto-detects and uses AVX2, SSE2, or NEON instructions
-- **Task-based OpenMP**: Recursive parallelism for excellent multi-core scaling
-- **GPU optimization**: Persistent buffers, async transfers, shared memory kernels
-- **Auto-tuning**: Dynamically selects best backend and configuration based on hardware
+The Fast Walsh-Hadamard Transform computes the Walsh spectrum of k-variable Boolean functions using butterfly operations:
 
-## Performance Characteristics
-
-- **Memory-bandwidth bound**: Performance depends primarily on memory subsystem, not raw compute
-- **CPU optimizations**: Software prefetching, cache-line aligned allocations, SIMD vectorization
-- **GPU considerations**: HBM-based datacenter GPUs (A30, A100, H100) preferred for consistent performance
-- **Batch processing**: GPU batch mode achieves 10-100× throughput vs sequential CPU for multiple transforms
-- **Numerical stability**: Documented overflow bounds and precision guarantees for all data types
+- **Time complexity**: `O(n log n) = O(k × 2^k)` for truth tables of size `n = 2^k`
+- **Space complexity**: `O(log n)` recursion stack (in-place, no temporary buffers)
+- **Divide-and-conquer**: Recursive with cache-efficient base cases (512-element cutoff fits in L1)
+- **Multi-backend architecture**:
+  - **CPU**: SIMD vectorization (AVX2/SSE2/NEON auto-detected), software prefetching, cache-aligned allocations
+  - **OpenMP**: Task-based recursive parallelism for multi-core scaling
+  - **GPU**: Persistent buffers, async transfers, shared memory kernels
+  - **Auto-tuning**: Runtime backend selection based on problem size and hardware
 
 ## Build and Install
 
@@ -119,7 +113,7 @@ fwht.transform(data)  # In-place, auto-selects best backend
 - Automatic backend selection (CPU SIMD, OpenMP, CUDA)
 - Support for `int8`, `int32`, and `float64` data types
 - Boolean function utilities for cryptanalysis
-- GPU achieves 30+ GOps/s with 9-10× speedup over CPU
+- GPU acceleration for large-scale transforms and batch operations
 
 See [`python/README.md`](python/README.md) for complete documentation and API reference.
 
@@ -179,14 +173,18 @@ Measurements gathered with `./build/fwht_bench` using `--repeats=10` (GPU runs i
 # Build library with OpenMP and benchmark (run from the libfwht root)
 make openmp bench
 
-# CPU timings on the Apple M4 host
+# CPU benchmarks (single-threaded and multi-threaded)
 ./build/fwht_bench \
     --backend=cpu \
     --sizes=16777216,33554432,67108864,134217728,268435456,1073741824 \
     --repeats=10
 
-# GPU timings on the NVIDIA A30 host  
-# (rebuild with CUDA support first)
+./build/fwht_bench \
+    --backend=openmp \
+    --sizes=16777216,33554432,67108864,134217728,268435456,1073741824 \
+    --repeats=10
+
+# GPU benchmarks (rebuild with CUDA support first)
 make clean && make bench
 ./build/fwht_bench \
     --backend=gpu \
@@ -195,58 +193,85 @@ make clean && make bench
     --warmup=1
 ```
 
-Each command samples the same transform sizes reported in the tables below. Adjust `--backend` and the size list as needed for other hardware.
+### CPU Performance
 
-**Apple M4 desktop (macOS 15.7.1)**
-CPU: Apple M4 (10 physical / 10 logical cores)
-Memory: 24 GiB unified
+#### Apple M4 (macOS 15.7.1)
 
-| Mode                     | Size (points) | Mean (ms) | StdDev (ms) |
-| :----------------------- | ------------: | --------: | ----------: |
-| cpu (single-threaded)    |    16,777,216 |      28.8 |         0.6 |
-|                          |    33,554,432 |      59.9 |         0.2 |
-|                          |    67,108,864 |     127.6 |         2.8 |
-|                          |   134,217,728 |     262.2 |         2.3 |
-|                          |   268,435,456 |     548.8 |        15.5 |
-|                          | 1,073,741,824 |   2,499.8 |       205.4 |
-| openmp (multi-threaded)  |    16,777,216 |      16.0 |         1.4 |
-|                          |    33,554,432 |      27.9 |         1.1 |
-|                          |    67,108,864 |      57.8 |         6.4 |
-|                          |   134,217,728 |     119.3 |         6.5 |
-|                          |   268,435,456 |     256.7 |        43.7 |
-|                          | 1,073,741,824 |   1,186.2 |        98.6 |
-| auto (runtime selection) |    16,777,216 |      18.1 |         4.9 |
-|                          |    33,554,432 |      31.6 |         6.7 |
-|                          |    67,108,864 |      61.4 |         6.7 |
-|                          |   134,217,728 |     124.4 |         7.2 |
-|                          |   268,435,456 |     273.8 |        11.0 |
-|                          | 1,073,741,824 |   1,253.4 |        97.5 |
+**System Configuration:**
+- CPU: Apple M4 (10 cores, ARM NEON)
+- Memory: 24 GB unified
 
-**NVIDIA A30 server (Linux 5.14.0-570.49.1.el9_6.x86_64)**
-GPU: NVIDIA A30 (CUDA 13.0 runtime, driver 580.95.05, nvcc 12.6.68)
-Host CPU: Dual AMD EPYC 9254 (48 hardware threads)
-System RAM: 377 GiB, GPU RAM: 24 GiB HBM2
+| Mode                     |    Size | Mean (ms) | StdDev (ms) |
+| :----------------------- | ------: | --------: | ----------: |
+| cpu (single-threaded)    |  2^24   |      27.4 |         1.0 |
+|                          |  2^25   |      57.6 |         0.8 |
+|                          |  2^26   |     123.4 |         2.8 |
+|                          |  2^27   |     262.7 |        16.3 |
+|                          |  2^28   |     547.3 |        17.7 |
+|                          |  2^30   |   2,417.8 |       147.4 |
+| openmp (multi-threaded)  |  2^24   |      15.3 |         0.5 |
+|                          |  2^25   |      27.8 |         2.0 |
+|                          |  2^26   |      56.8 |         4.5 |
+|                          |  2^27   |     115.3 |         4.6 |
+|                          |  2^28   |     248.6 |         8.3 |
+|                          |  2^30   |   1,119.7 |        35.9 |
 
-| Size (points) | Mean (ms) | StdDev (ms) | Speedup vs CPU |
-| ------------: | --------: | ----------: | -------------: |
-|    16,777,216 |      10.7 |         0.0 |          2.7× |
-|    33,554,432 |      22.8 |         1.0 |          2.6× |
-|    67,108,864 |      47.3 |         0.1 |          2.7× |
-|   134,217,728 |      86.9 |         3.5 |          3.0× |
-|   268,435,456 |     171.9 |         0.1 |          3.2× |
-| 1,073,741,824 |     714.6 |         5.6 |          3.5× |
+#### AMD EPYC 9254 (Linux)
+
+**System Configuration:**
+- CPU: AMD EPYC 9254 24-Core Processor (48 threads, x86_64 AVX2)
+- Memory: 377 GB
+
+| Mode                     |    Size | Mean (ms) | StdDev (ms) |
+| :----------------------- | ------: | --------: | ----------: |
+| cpu (single-threaded)    |  2^24   |      56.1 |         0.0 |
+|                          |  2^25   |     116.2 |         0.1 |
+|                          |  2^26   |     240.9 |         0.1 |
+|                          |  2^27   |     589.0 |         0.1 |
+|                          |  2^28   |   1,393.2 |         0.3 |
+|                          |  2^30   |   7,286.1 |         1.1 |
+| openmp (multi-threaded)  |  2^24   |      29.5 |         5.8 |
+|                          |  2^25   |      40.8 |         7.3 |
+|                          |  2^26   |      68.6 |         9.4 |
+|                          |  2^27   |     221.6 |         8.6 |
+|                          |  2^28   |     514.9 |         7.0 |
+|                          |  2^30   |   2,235.8 |       140.0 |
+
+### GPU Performance (NVIDIA A30, Linux)
+
+**System Configuration:**
+- GPU: NVIDIA A30 (CUDA 13.0 runtime, driver 580.95.05, nvcc 12.6.68)
+- Host CPU: Dual AMD EPYC 9254 (48 hardware threads)
+- System RAM: 377 GB, GPU RAM: 24 GB HBM2
+
+|    Size | Mean (ms) | StdDev (ms) |
+| ------: | --------: | ----------: |
+|  2^24   |      10.7 |         0.0 |
+|  2^25   |      22.8 |         1.0 |
+|  2^26   |      47.3 |         0.1 |
+|  2^27   |      86.9 |         3.5 |
+|  2^28   |     171.9 |         0.1 |
+|  2^30   |     714.6 |         5.6 |
 
 ## Performance Insights
 
-- **FWHT is extremely memory-bandwidth bound**: Performance depends on memory subsystem, not raw TFLOPS
-  - Each element accessed log₂(n) times with irregular stride patterns (low arithmetic intensity)
-- **GPU architecture matters**: A30 (HBM2) achieves 2.7-3.5× speedup with ±0.1ms variance; RTX 4090 (GDDR6X) shows 1.8-2.4× with ±3-22ms variance
-- **OpenMP scales well**: 2.7× speedup on 10 cores via task-based recursive parallelism
-- **Best practices**:
-  - Single transforms < 64M: Use OpenMP CPU (lower latency)
-  - Single transforms ≥ 64M: GPU benefits from reduced PCIe overhead ratio
-  - Batch operations (10+ transforms): GPU strongly preferred
-  - GPU selection: Prefer HBM-based datacenter GPUs for consistent performance
+**Memory-Bandwidth Bound Algorithm:**
+- FWHT performance depends on memory subsystem bandwidth, not FLOPS
+- Each element is accessed log₂(n) times with irregular stride patterns (low arithmetic intensity)
+- CPU optimizations focus on cache efficiency and SIMD vectorization
+
+**Backend Selection Guidelines:**
+- **CPU single-threaded**: Small transforms (n < 1M) or when latency matters
+- **OpenMP multi-threaded**: Medium to large transforms on multi-core systems (near-linear scaling observed)
+- **GPU**: Large single transforms (n ≥ 64M) or batch operations (10+ transforms)
+  - HBM-based datacenter GPUs (A30, A100, H100) provide consistent low-variance performance
+  - Consumer GPUs with GDDR6X may show higher timing variance
+- **Auto mode**: Let the library choose based on problem size and available hardware
+
+**Numerical Stability:**
+- `fwht_i32`: Safe for all n if `|input[i]| ≤ 1`; general rule: `n × max(|input|) < 2^31`
+- `fwht_f64`: Relative error typically `< log₂(n) × 2.22e-16`
+- `fwht_i8`: Only safe for `n ≤ 64` with `|input| = 1` (overflow risk)
 
 ## Repository Layout
 
