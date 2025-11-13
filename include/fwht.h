@@ -41,8 +41,8 @@ extern "C" {
 
 #define FWHT_VERSION_MAJOR 1
 #define FWHT_VERSION_MINOR 1
-#define FWHT_VERSION_PATCH 2
-#define FWHT_VERSION "1.1.2"
+#define FWHT_VERSION_PATCH 3
+#define FWHT_VERSION "1.1.3"
 
 /* ============================================================================
  * BACKEND SELECTION
