@@ -346,7 +346,7 @@ TEST(log2_check) {
 TEST(version_info) {
     const char* version = fwht_version();
     ASSERT(version != NULL, "Version string is NULL");
-    ASSERT(strcmp(version, "1.1.3") == 0, "Version mismatch");
+    ASSERT(strcmp(version, "1.1.4") == 0, "Version mismatch");
 }
 
 /* ============================================================================

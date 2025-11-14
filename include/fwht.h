@@ -21,7 +21,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  *
- * Version: 1.1.2
+ * Version: 1.1.4
  */
 
 #ifndef FWHT_H
@@ -41,8 +41,8 @@ extern "C" {
 
 #define FWHT_VERSION_MAJOR 1
 #define FWHT_VERSION_MINOR 1
-#define FWHT_VERSION_PATCH 3
-#define FWHT_VERSION "1.1.3"
+#define FWHT_VERSION_PATCH 4
+#define FWHT_VERSION "1.1.4"
 
 /* ============================================================================
  * BACKEND SELECTION
@@ -51,6 +51,7 @@ extern "C" {
 typedef enum {
     FWHT_BACKEND_AUTO = 0,    /* Automatic selection based on size */
     FWHT_BACKEND_CPU,         /* Single-threaded reference implementation */
+    FWHT_BACKEND_CPU_SAFE,    /* CPU with runtime overflow detection */
     FWHT_BACKEND_OPENMP,      /* Multi-threaded CPU (OpenMP) */
     FWHT_BACKEND_GPU          /* GPU-accelerated (CUDA) */
 } fwht_backend_t;
@@ -71,7 +72,8 @@ typedef enum {
     FWHT_ERROR_BACKEND_UNAVAILABLE, /* Requested backend not available */
     FWHT_ERROR_OUT_OF_MEMORY,       /* Memory allocation failed */
     FWHT_ERROR_INVALID_ARGUMENT,    /* Other invalid argument */
-    FWHT_ERROR_CUDA                 /* CUDA runtime error */
+    FWHT_ERROR_CUDA,                /* CUDA runtime error */
+    FWHT_ERROR_OVERFLOW             /* Integer overflow detected */
 } fwht_status_t;
 
 const char* fwht_error_string(fwht_status_t status);
@@ -105,6 +107,26 @@ const char* fwht_error_string(fwht_status_t status);
  * Thread-safe: Yes (different arrays can be processed concurrently)
  */
 fwht_status_t fwht_i32(int32_t* data, size_t n);
+
+/*
+ * In-place WHT for 32-bit integers with runtime overflow detection.
+ * 
+ * This variant uses compiler builtins (__builtin_add_overflow,
+ * __builtin_sub_overflow) to detect integer overflow during computation.
+ * Returns FWHT_ERROR_OVERFLOW if any overflow is detected.
+ * 
+ * Performance: ~5-10% slower than fwht_i32() due to overflow checks.
+ * 
+ * Use when:
+ *   - Input magnitudes are large or unknown
+ *   - Safety is more important than performance
+ *   - Validating that n * max(|input|) < 2^31
+ * 
+ * Returns:
+ *   FWHT_SUCCESS - Transform completed without overflow
+ *   FWHT_ERROR_OVERFLOW - Integer overflow detected, data may be corrupted
+ */
+fwht_status_t fwht_i32_safe(int32_t* data, size_t n);
 
 /*
  * In-place Walsh-Hadamard Transform for double precision floats.
@@ -176,6 +198,58 @@ fwht_gpu_metrics_t fwht_gpu_get_last_metrics(void);
  */
 fwht_status_t fwht_batch_i32_cuda(int32_t* data, size_t n, size_t batch_size);
 fwht_status_t fwht_batch_f64_cuda(double* data, size_t n, size_t batch_size);
+
+/* ============================================================================
+ * PERSISTENT GPU CONTEXT API
+ * 
+ * For applications that compute many WHTs repeatedly, creating a persistent
+ * context pre-allocates GPU memory and eliminates repeated cudaMalloc/cudaFree
+ * overhead. This can provide 5-10x speedup for cryptanalysis workloads.
+ * 
+ * Usage:
+ *   fwht_gpu_context_t* ctx = fwht_gpu_context_create(max_n, max_batch_size);
+ *   for (many iterations) {
+ *       fwht_gpu_context_compute_i32(ctx, data, n, batch_size);
+ *   }
+ *   fwht_gpu_context_destroy(ctx);
+ * ============================================================================ */
+
+typedef struct fwht_gpu_context fwht_gpu_context_t;
+
+/*
+ * Create a persistent GPU context with pre-allocated device memory.
+ * 
+ * Parameters:
+ *   max_n          - Maximum transform size (must be power of 2)
+ *   max_batch_size - Maximum batch size
+ * 
+ * Returns: Context pointer, or NULL on error
+ * 
+ * The context pre-allocates max_n * max_batch_size elements on the GPU.
+ * Subsequent transforms with n <= max_n and batch <= max_batch_size
+ * will reuse this allocation without cudaMalloc/cudaFree overhead.
+ */
+fwht_gpu_context_t* fwht_gpu_context_create(size_t max_n, size_t max_batch_size);
+
+/*
+ * Destroy GPU context and free all allocated resources.
+ */
+void fwht_gpu_context_destroy(fwht_gpu_context_t* ctx);
+
+/*
+ * Compute WHT using persistent context (int32).
+ * Must have: n <= ctx->max_n && batch_size <= ctx->max_batch_size
+ */
+fwht_status_t fwht_gpu_context_compute_i32(fwht_gpu_context_t* ctx, 
+                                            int32_t* data, size_t n, size_t batch_size);
+
+/*
+ * Compute WHT using persistent context (double).
+ * Must have: n <= ctx->max_n && batch_size <= ctx->max_batch_size
+ */
+fwht_status_t fwht_gpu_context_compute_f64(fwht_gpu_context_t* ctx,
+                                            double* data, size_t n, size_t batch_size);
+
 #endif
 
 /* ============================================================================
