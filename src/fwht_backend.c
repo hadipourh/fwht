@@ -53,11 +53,12 @@ bool fwht_has_openmp(void) {
 
 const char* fwht_backend_name(fwht_backend_t backend) {
     switch (backend) {
-        case FWHT_BACKEND_AUTO:   return "auto";
-        case FWHT_BACKEND_CPU:    return "cpu";
-        case FWHT_BACKEND_OPENMP: return "openmp";
-        case FWHT_BACKEND_GPU:    return "gpu";
-        default:                  return "unknown";
+        case FWHT_BACKEND_AUTO:      return "auto";
+        case FWHT_BACKEND_CPU:       return "cpu";
+        case FWHT_BACKEND_CPU_SAFE:  return "cpu_safe";
+        case FWHT_BACKEND_OPENMP:    return "openmp";
+        case FWHT_BACKEND_GPU:       return "gpu";
+        default:                     return "unknown";
     }
 }
 
@@ -70,6 +71,7 @@ const char* fwht_error_string(fwht_status_t status) {
         case FWHT_ERROR_OUT_OF_MEMORY:        return "out of memory";
         case FWHT_ERROR_INVALID_ARGUMENT:     return "invalid argument";
         case FWHT_ERROR_CUDA:                 return "CUDA error";
+        case FWHT_ERROR_OVERFLOW:             return "integer overflow detected";
         default:                              return "unknown error";
     }
 }

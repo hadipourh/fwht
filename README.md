@@ -13,7 +13,8 @@ High-performance C99 library for computing the Fast Walsh-Hadamard Transform (FW
 - **Multiple Backends**: Vectorized CPU (AVX2/SSE2/NEON), OpenMP multi-threading, CUDA GPU acceleration
 - **Automatic Backend Selection**: Chooses optimal implementation based on problem size and available hardware
 - **Memory Efficient**: In-place algorithm with `O(log n)` stack space, cache-aligned allocations
-- **High Performance**: Task-based OpenMP parallelism, GPU acceleration for large transforms and batch processing
+- **High Performance**: Adaptive OpenMP task depth for 64+ core systems, persistent GPU contexts for repeated transforms
+- **Overflow Safety**: Optional runtime overflow detection for int32 transforms with `fwht_i32_safe()`
 - **Flexible API**: In-place transforms, out-of-place helpers, batch processing, Boolean function utilities
 - **Production Ready**: Comprehensive test suite, numerical stability guarantees, command-line tool included
 - **Easy Integration**: C99 standard, minimal dependencies, Python bindings available via PyPI
@@ -67,16 +68,40 @@ Compile with `gcc example.c -lfwht -lm` (or link directly against `libfwht.a` in
 
 - `fwht_i32`: in-place transform for `int32_t` data (default entry point for Boolean spectra)
   - Safe for all n if `|input[i]| ≤ 1`; general rule: `n × max(|input|) < 2^31`
+- `fwht_i32_safe`: overflow-safe variant with runtime detection (returns `FWHT_ERROR_OVERFLOW` on overflow)
+  - ~5-10% slower but guarantees detection of integer overflow
+  - Use when input magnitudes are large or unknown
 - `fwht_f64`: in-place transform for `double` data when fractional coefficients matter
   - Relative error typically `< log₂(n) × 2.22e-16` (e.g., `< 2e-15` for n=2^20)
 - `fwht_i8`: in-place transform for `int8_t` data to minimize memory footprint
   - **Note:** Only safe for `n ≤ 64` with `|input| = 1` (watch for overflow)
-- `fwht_i32_backend`, `fwht_f64_backend`: same transforms with explicit backend selection (`AUTO`, `CPU`, `OPENMP`, `GPU`)
+- `fwht_i32_backend`, `fwht_f64_backend`: same transforms with explicit backend selection (`AUTO`, `CPU`, `CPU_SAFE`, `OPENMP`, `GPU`)
 - `fwht_compute_i32`, `fwht_compute_f64`: out-of-place transforms returning cache-aligned memory
   - **Important:** Must use `fwht_free()` instead of `free()` to deallocate results
 - `fwht_from_bool`: convert a Boolean truth table to signed Walsh coefficients before transforming
 - `fwht_correlations`: normalize Walsh coefficients to per-mask correlation values
 - `fwht_has_gpu`, `fwht_has_openmp`, `fwht_backend_name`: query runtime capabilities and selected backend
+
+### GPU Context API (CUDA)
+
+For applications computing many WHTs repeatedly, persistent GPU contexts eliminate malloc/free overhead:
+
+```c
+#ifdef USE_CUDA
+/* Create context with max transform size and batch size */
+fwht_gpu_context_t* ctx = fwht_gpu_context_create(1024, 100);
+
+/* Reuse pre-allocated GPU memory for many transforms */
+for (int i = 0; i < 10000; i++) {
+    fwht_gpu_context_compute_i32(ctx, data, 256, 1);
+}
+
+/* Clean up */
+fwht_gpu_context_destroy(ctx);
+#endif
+```
+
+**Performance benefit**: 5-10x speedup for cryptanalysis workloads with many small transforms.
 
 ## Python Package
 

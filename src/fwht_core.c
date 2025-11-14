@@ -177,9 +177,63 @@ static inline void fwht_process_range_i32(int32_t* FWHT_RESTRICT even,
     }
 }
 
+/* Overflow-safe version using compiler builtins */
+static inline int fwht_process_range_i32_safe(int32_t* FWHT_RESTRICT even, 
+                                                int32_t* FWHT_RESTRICT odd, 
+                                                size_t count) {
+    if (count == 0) {
+        return 0;  /* No overflow */
+    }
+
+#if defined(__GNUC__) || defined(__clang__)
+    /* Use compiler builtins for overflow detection */
+    for (size_t j = 0; j < count; ++j) {
+        int32_t a = even[j];
+        int32_t b = odd[j];
+        int32_t sum, diff;
+        
+        if (__builtin_add_overflow(a, b, &sum) || 
+            __builtin_sub_overflow(a, b, &diff)) {
+            return 1;  /* Overflow detected */
+        }
+        
+        even[j] = sum;
+        odd[j] = diff;
+    }
+    return 0;  /* No overflow */
+#else
+    /* Fallback: manual overflow checking for MSVC and other compilers */
+    for (size_t j = 0; j < count; ++j) {
+        int32_t a = even[j];
+        int32_t b = odd[j];
+        
+        /* Check addition overflow: (a > 0 && b > 0 && a > INT32_MAX - b) */
+        if ((a > 0 && b > 0 && a > (int32_t)0x7FFFFFFF - b) ||
+            (a < 0 && b < 0 && a < (int32_t)0x80000000 - b)) {
+            return 1;  /* Add overflow */
+        }
+        
+        /* Check subtraction overflow: (a > 0 && b < 0 && a > INT32_MAX + b) */
+        if ((a > 0 && b < 0 && a > (int32_t)0x7FFFFFFF + b) ||
+            (a < 0 && b > 0 && a < (int32_t)0x80000000 + b)) {
+            return 1;  /* Sub overflow */
+        }
+        
+        even[j] = a + b;
+        odd[j] = a - b;
+    }
+    return 0;  /* No overflow */
+#endif
+}
+
 static inline void fwht_process_block_i32(int32_t* FWHT_RESTRICT data, 
                                            size_t base, size_t h) {
     fwht_process_range_i32(data + base, data + base + h, h);
+}
+
+static inline int fwht_process_block_i32_safe(int32_t* FWHT_RESTRICT data, 
+                                                size_t base, size_t h) {
+    return fwht_process_range_i32_safe(data + base, data + base + h, h);
 }
 
 static inline void fwht_process_range_f64(double* FWHT_RESTRICT even, 
@@ -285,6 +339,49 @@ static void fwht_butterfly_i32_recursive_cpu(int32_t* data, size_t n) {
     
     /* Combine: butterfly between the two halves */
     fwht_process_block_i32(data, 0, half);
+}
+
+/*
+ * Safe iterative FWHT with overflow detection.
+ * Returns: 0 on success, 1 if overflow detected.
+ */
+static int fwht_butterfly_i32_iterative_safe(int32_t* data, size_t n) {
+    for (size_t h = 1; h < n; h <<= 1) {
+        size_t stride = h << 1;
+        for (size_t i = 0; i < n; i += stride) {
+            if (fwht_process_block_i32_safe(data, i, h)) {
+                return 1;  /* Overflow detected */
+            }
+        }
+    }
+    return 0;  /* Success */
+}
+
+/*
+ * Safe recursive FWHT with overflow detection.
+ * Returns: 0 on success, 1 if overflow detected.
+ */
+static int fwht_butterfly_i32_recursive_safe(int32_t* data, size_t n) {
+    if (n <= FWHT_CPU_RECURSIVE_CUTOFF) {
+        return fwht_butterfly_i32_iterative_safe(data, n);
+    }
+    
+    size_t half = n >> 1;
+    
+    /* Recursively transform both halves */
+    if (fwht_butterfly_i32_recursive_safe(data, half)) {
+        return 1;  /* Overflow in left half */
+    }
+    if (fwht_butterfly_i32_recursive_safe(data + half, half)) {
+        return 1;  /* Overflow in right half */
+    }
+    
+    /* Combine: butterfly between the two halves */
+    if (fwht_process_block_i32_safe(data, 0, half)) {
+        return 1;  /* Overflow in combine step */
+    }
+    
+    return 0;  /* Success */
 }
 
 /*
@@ -403,9 +500,11 @@ static void fwht_butterfly_i32_base(int32_t* data, size_t n) {
  *      c. Combine halves with butterfly operation
  * 
  * Depth parameter limits task creation to avoid overhead.
- * Tasks are only created for depth < 3, giving up to 8 parallel tasks.
+ * Adaptive: depth limit is calculated based on thread count.
+ * With T threads, create tasks while depth < log2(T) + 2.
+ * This ensures roughly T tasks are active at peak parallelism.
  */
-static void fwht_butterfly_i32_recursive(int32_t* data, size_t n, int depth) {
+static void fwht_butterfly_i32_recursive(int32_t* data, size_t n, int depth, int max_depth) {
     if (n <= FWHT_RECURSIVE_CUTOFF) {
         fwht_butterfly_i32_base(data, n);
         return;
@@ -414,11 +513,11 @@ static void fwht_butterfly_i32_recursive(int32_t* data, size_t n, int depth) {
     size_t half = n >> 1;
     
     /* Create tasks for the two independent halves (if not too deep) */
-    #pragma omp task shared(data) if(depth < 3)
-    fwht_butterfly_i32_recursive(data, half, depth + 1);
+    #pragma omp task shared(data) if(depth < max_depth)
+    fwht_butterfly_i32_recursive(data, half, depth + 1, max_depth);
     
-    #pragma omp task shared(data) if(depth < 3)
-    fwht_butterfly_i32_recursive(data + half, half, depth + 1);
+    #pragma omp task shared(data) if(depth < max_depth)
+    fwht_butterfly_i32_recursive(data + half, half, depth + 1, max_depth);
     
     #pragma omp taskwait
     
@@ -429,6 +528,10 @@ static void fwht_butterfly_i32_recursive(int32_t* data, size_t n, int depth) {
 /*
  * OpenMP entry point using recursive task-based parallelism.
  * Much better cache locality and scaling than stage-based approach.
+ * 
+ * Adaptive task depth: calculates optimal depth based on number of threads.
+ * Formula: max_depth = log2(num_threads) + 2
+ * This creates roughly 2-4x more tasks than threads for good load balancing.
  */
 static void fwht_butterfly_i32_openmp(int32_t* data, size_t n) {
     if (n < 2) {
@@ -438,7 +541,25 @@ static void fwht_butterfly_i32_openmp(int32_t* data, size_t n) {
     #pragma omp parallel
     {
         #pragma omp single
-        fwht_butterfly_i32_recursive(data, n, 0);
+        {
+            /* Calculate adaptive task depth based on thread count */
+            int num_threads = omp_get_num_threads();
+            int max_depth = 2;  /* Minimum depth for small thread counts */
+            
+            /* For larger thread counts, scale depth adaptively */
+            if (num_threads >= 4) {
+                /* Calculate log2(num_threads) */
+                int log_threads = 0;
+                int t = num_threads;
+                while (t > 1) {
+                    t >>= 1;
+                    log_threads++;
+                }
+                max_depth = log_threads + 2;  /* +2 for good load balancing */
+            }
+            
+            fwht_butterfly_i32_recursive(data, n, 0, max_depth);
+        }
     }
 }
 
@@ -465,7 +586,7 @@ static void fwht_butterfly_f64_base(double* data, size_t n) {
 /*
  * Recursive helper for double precision OpenMP FWHT.
  */
-static void fwht_butterfly_f64_recursive(double* data, size_t n, int depth) {
+static void fwht_butterfly_f64_recursive(double* data, size_t n, int depth, int max_depth) {
     if (n <= FWHT_RECURSIVE_CUTOFF) {
         fwht_butterfly_f64_base(data, n);
         return;
@@ -473,11 +594,11 @@ static void fwht_butterfly_f64_recursive(double* data, size_t n, int depth) {
     
     size_t half = n >> 1;
     
-    #pragma omp task shared(data) if(depth < 3)
-    fwht_butterfly_f64_recursive(data, half, depth + 1);
+    #pragma omp task shared(data) if(depth < max_depth)
+    fwht_butterfly_f64_recursive(data, half, depth + 1, max_depth);
     
-    #pragma omp task shared(data) if(depth < 3)
-    fwht_butterfly_f64_recursive(data + half, half, depth + 1);
+    #pragma omp task shared(data) if(depth < max_depth)
+    fwht_butterfly_f64_recursive(data + half, half, depth + 1, max_depth);
     
     #pragma omp taskwait
     
@@ -486,6 +607,7 @@ static void fwht_butterfly_f64_recursive(double* data, size_t n, int depth) {
 
 /*
  * OpenMP entry point for double precision using recursive task-based parallelism.
+ * Adaptive task depth for optimal scaling on systems with many cores.
  */
 static void fwht_butterfly_f64_openmp(double* data, size_t n) {
     if (n < 2) {
@@ -495,7 +617,25 @@ static void fwht_butterfly_f64_openmp(double* data, size_t n) {
     #pragma omp parallel
     {
         #pragma omp single
-        fwht_butterfly_f64_recursive(data, n, 0);
+        {
+            /* Calculate adaptive task depth based on thread count */
+            int num_threads = omp_get_num_threads();
+            int max_depth = 2;  /* Minimum depth for small thread counts */
+            
+            /* For larger thread counts, scale depth adaptively */
+            if (num_threads >= 4) {
+                /* Calculate log2(num_threads) */
+                int log_threads = 0;
+                int t = num_threads;
+                while (t > 1) {
+                    t >>= 1;
+                    log_threads++;
+                }
+                max_depth = log_threads + 2;  /* +2 for good load balancing */
+            }
+            
+            fwht_butterfly_f64_recursive(data, n, 0, max_depth);
+        }
     }
 }
 #endif /* _OPENMP */
@@ -545,6 +685,17 @@ fwht_status_t fwht_i32_cpu(int32_t* data, size_t n) {
     return FWHT_SUCCESS;
 }
 
+fwht_status_t fwht_i32_cpu_safe(int32_t* data, size_t n) {
+    fwht_status_t status = validate_input(data, n);
+    if (status != FWHT_SUCCESS) return status;
+    
+    fwht_report_simd_mode();
+    if (fwht_butterfly_i32_recursive_safe(data, n)) {
+        return FWHT_ERROR_OVERFLOW;
+    }
+    return FWHT_SUCCESS;
+}
+
 fwht_status_t fwht_f64_cpu(double* data, size_t n) {
     fwht_status_t status = validate_input(data, n);
     if (status != FWHT_SUCCESS) return status;
@@ -556,6 +707,11 @@ fwht_status_t fwht_f64_cpu(double* data, size_t n) {
 /* Default API routes to AUTO backend */
 fwht_status_t fwht_i32(int32_t* data, size_t n) {
     return fwht_i32_backend(data, n, FWHT_BACKEND_AUTO);
+}
+
+/* Safe variant with overflow detection */
+fwht_status_t fwht_i32_safe(int32_t* data, size_t n) {
+    return fwht_i32_backend(data, n, FWHT_BACKEND_CPU_SAFE);
 }
 
 fwht_status_t fwht_f64(double* data, size_t n) {
@@ -595,6 +751,9 @@ fwht_status_t fwht_i32_backend(int32_t* data, size_t n, fwht_backend_t backend) 
             fwht_report_simd_mode();
             fwht_butterfly_i32(data, n);
             return FWHT_SUCCESS;
+        
+        case FWHT_BACKEND_CPU_SAFE:
+            return fwht_i32_cpu_safe(data, n);
             
 #ifdef USE_CUDA
         case FWHT_BACKEND_GPU:
