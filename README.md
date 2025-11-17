@@ -14,6 +14,8 @@ High-performance C99 library for computing the Fast Walsh-Hadamard Transform (FW
 - **Automatic Backend Selection**: Chooses optimal implementation based on problem size and available hardware
 - **Memory Efficient**: In-place algorithm with `O(log n)` stack space, cache-aligned allocations
 - **High Performance**: Adaptive OpenMP task depth for 64+ core systems, persistent GPU contexts for repeated transforms
+- **Vectorized Batch Processing**: SIMD-accelerated batch API processes multiple transforms simultaneously (ideal for cryptanalysis)
+- **Bit-packed Boolean WHT**: New high-level API to compute WHT from 1-bit packed truth tables (32× memory savings)
 - **Overflow Safety**: Optional runtime overflow detection for int32 transforms with `fwht_i32_safe()`
 - **Flexible API**: In-place transforms, out-of-place helpers, batch processing, Boolean function utilities
 - **Production Ready**: Comprehensive test suite, numerical stability guarantees, command-line tool included
@@ -74,6 +76,8 @@ Compile with `gcc example.c -lfwht -lm` (or link directly against `libfwht.a` in
 - `fwht_f64`: in-place transform for `double` data when fractional coefficients matter
   - Relative error typically `< log₂(n) × 2.22e-16` (e.g., `< 2e-15` for n=2^20)
 - `fwht_i8`: in-place transform for `int8_t` data to minimize memory footprint
+- `fwht_boolean_packed`: compute WHT directly from a bit-packed Boolean truth table (`uint64` words); ideal for S-box analysis
+- `fwht_boolean_batch`: batch processing of multiple bit-packed Boolean functions (vectorial S-box components)
   - **Note:** Only safe for `n ≤ 64` with `|input| = 1` (watch for overflow)
 - `fwht_i32_backend`, `fwht_f64_backend`: same transforms with explicit backend selection (`AUTO`, `CPU`, `CPU_SAFE`, `OPENMP`, `GPU`)
 - `fwht_compute_i32`, `fwht_compute_f64`: out-of-place transforms returning cache-aligned memory
@@ -102,6 +106,50 @@ fwht_gpu_context_destroy(ctx);
 ```
 
 **Performance benefit**: 5-10x speedup for cryptanalysis workloads with many small transforms.
+
+### Vectorized Batch Processing
+
+For cryptanalysis workloads that require processing hundreds or thousands of small transforms (e.g., S-box analysis), the batch API processes multiple transforms simultaneously using SIMD instructions:
+
+```c
+/* Analyze 1000 S-box truth tables (each size 256) */
+int32_t** sboxes = malloc(1000 * sizeof(int32_t*));
+for (int i = 0; i < 1000; i++) {
+    sboxes[i] = malloc(256 * sizeof(int32_t));
+    /* Fill with S-box truth table data */
+}
+
+/* Process all transforms in parallel with SIMD */
+fwht_i32_batch(sboxes, 256, 1000);
+
+/* Cleanup */
+for (int i = 0; i < 1000; i++) free(sboxes[i]);
+free(sboxes);
+```
+
+**Implementation:**
+- **AVX2** (x86-64): Processes 8 int32 or 4 double transforms simultaneously
+- **NEON** (ARM): Processes 4 int32 or 2 double transforms simultaneously
+- **Transpose algorithm**: Inspired by Intel MKL FFT batch processing
+- **Expected speedup**: 3-5× for small transforms (N ≤ 256) compared to sequential processing
+
+**Perfect for:**
+- Cryptographic S-box analysis (thousands of small truth tables)
+- Boolean function enumeration and classification
+- Correlation-immunity testing across multiple functions
+
+### Bit-packed Boolean Functions
+
+When your Boolean function is stored in a bitset (1 bit per entry), use the packed API for memory efficiency and speed:
+
+```c
+/* Truth table [0,1,1,0,1,0,0,1] → bits 1,2,4,7 set → 0x96 */
+uint64_t packed = 0x96ULL;
+int32_t wht[8];
+fwht_status_t st = fwht_boolean_packed(&packed, wht, 8);
+```
+
+See `examples/example_boolean_packed.c` for a complete sample, including packing helpers and verification against the unpacked API.
 
 ## Python Package
 
@@ -187,6 +235,21 @@ Exit status `0` indicates success; non-zero signals parse or transform errors.
 
 Always run these targets from the `libfwht` root so generated artefacts remain in the build tree.
 
+## Examples
+
+Build and run example programs:
+
+```
+make examples
+# or
+make example   # alias
+
+./examples/example_basic
+./examples/example_boolean_packed
+```
+
+The bit-packed example shows how to pack a Boolean truth table into `uint64_t` words and compute the WHT directly via `fwht_boolean_packed`.
+
 ## Benchmark Reference
 
 Measurements gathered with `./build/fwht_bench` using `--repeats=10` (GPU runs include `--warmup=1`).
@@ -206,11 +269,23 @@ make openmp bench
 # GPU benchmarks (rebuild with CUDA support first)
 make clean && make bench
 ./build/fwht_bench \
-    --backend=gpu \
-    --sizes=16777216,33554432,67108864,134217728,268435456,1073741824 \
-    --repeats=10 \
-    --warmup=1
+  --backend=gpu \
+  --sizes=16777216,33554432,67108864,134217728,268435456,1073741824 \
+  --repeats=10 \
+  --warmup=1 \
+  --profile \
+  --pinned \
+  --use-context \
+  --multi-shuffle=on
 ```
+
+GPU feature flags:
+
+- `--profile`: report H2D / Kernel / D2H timing breakdowns (also enabled via FWHT_GPU_PROFILE=1)
+- `--pinned`: allocate page-locked host buffers for faster transfers
+- `--use-context`: reuse a persistent GPU context (avoid cudaMalloc/cudaFree per run)
+- `--device-resident`: keep data on device and measure kernel-only time (no H2D/D2H)
+- `--multi-shuffle=on|off`: force enable/disable warp multi-shuffle optimization for medium sizes
 
 ### CPU Performance
 
@@ -299,6 +374,34 @@ make clean && make bench
 - `fwht_i8`: Only safe for `n ≤ 64` with `|input| = 1` (overflow risk)
 
 ## Repository Layout
+
+## Comparing with Dao-AILab/fast-hadamard-transform
+
+A Python harness is provided to compare pyfwht (CPU/GPU) with the Dao-AILab fast-hadamard-transform (PyTorch CUDA extension).
+
+Prerequisites:
+- pyfwht installed (from this repo or PyPI once available)
+- PyTorch (GPU build if you want GPU comparison)
+- Dao-AILab library installed (module name typically `fast_hadamard_transform`). See `python/INSTALL_DAO_FHT.md` for troubleshooting.
+
+Quick start:
+
+```
+python tools/compare_libs.py --powers 20 22 --batches 1 4 --dtype float32 --repeats 10 --warmup 3 --csv results.csv
+```
+
+Useful flags:
+- `--include-transfer`: include H2D/D2H time for GPU implementations (default approximates kernel-only)
+- `--device cpu|gpu|auto`: target device for Dao-AILab; pyfwht runs CPU and GPU (if available)
+- `--dao-module` / `--dao-func`: override module and function names if your install exports different symbols
+
+Outputs:
+- Console throughput in GOps/s using 2×N×log2(N) add/sub operations
+- Optional CSV with details: implementation, device, size, batch, dtype, time, GOps/s, max abs error
+
+Caveats:
+- Dtype parity: pyfwht GPU commonly exposes float64 and int32 batch APIs; Dao-AILab often targets float32. The harness will fall back to a safe dtype (e.g., cast float32→float64 for pyfwht) and annotate a note.
+- GPU arch support: some GPUs (e.g., RTX 50xx, sm_120) may lack prebuilt kernels in current PyTorch wheels. In that case, Dao-AILab will be skipped automatically.
 
 ```
 libfwht/

@@ -58,6 +58,8 @@ CLI_SRC = $(TOOLS_DIR)/fwht_cli.c
 CLI_BIN = $(BUILD_DIR)/fwht_cli
 EXAMPLE_SRC = $(EXAMPLES_DIR)/example_basic.c
 EXAMPLE_BIN = $(EXAMPLES_DIR)/example_basic
+EXAMPLE2_SRC = $(EXAMPLES_DIR)/example_boolean_packed.c
+EXAMPLE2_BIN = $(EXAMPLES_DIR)/example_boolean_packed
 
 # Source files (CPU)
 SRCS = $(wildcard $(SRC_DIR)/*.c)
@@ -139,6 +141,9 @@ endif
 
 all: directories lib test
 
+# Convenience alias (common typo)
+example: examples
+
 # Create build directories
 directories:
 	@mkdir -p $(BUILD_DIR) $(LIB_DIR)
@@ -216,18 +221,22 @@ endif
 bench: directories $(STATIC_LIB)
 ifeq ($(USE_CUDA),1)
 	@echo "Building benchmark (CUDA enabled)..."
-	$(CXX) $(CXXFLAGS) $(BENCH_DIR)/fwht_bench.c -L$(LIB_DIR) -lfwht $(CUDA_LDFLAGS) -lm -o $(BUILD_DIR)/fwht_bench -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
+	$(CXX) $(CXXFLAGS) $(BENCH_DIR)/fwht_bench.c -L$(LIB_DIR) -lfwht $(CUDA_LDFLAGS) $(LDFLAGS) -lm -o $(BUILD_DIR)/fwht_bench -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
 else
 	@echo "Building benchmark..."
-	$(CC) $(CFLAGS) $(BENCH_DIR)/fwht_bench.c -L$(LIB_DIR) -lfwht -lm -o $(BUILD_DIR)/fwht_bench -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
+	$(CC) $(CFLAGS) $(BENCH_DIR)/fwht_bench.c -L$(LIB_DIR) -lfwht $(LDFLAGS) -lm -o $(BUILD_DIR)/fwht_bench -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
 endif
 	@echo "Run with: ./build/fwht_bench [options]"
 
 # Build example programs
-examples: directories lib $(EXAMPLE_BIN)
+examples: directories lib $(EXAMPLE_BIN) $(EXAMPLE2_BIN)
 	@echo "Example binaries available in $(EXAMPLES_DIR)/"
 
 $(EXAMPLE_BIN): $(EXAMPLE_SRC) $(STATIC_LIB)
+	@echo "Building example: $@"
+	$(CC) $(CFLAGS) $< -L$(LIB_DIR) -lfwht -lm -o $@ -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
+
+$(EXAMPLE2_BIN): $(EXAMPLE2_SRC) $(STATIC_LIB)
 	@echo "Building example: $@"
 	$(CC) $(CFLAGS) $< -L$(LIB_DIR) -lfwht -lm -o $@ -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
 
@@ -253,11 +262,35 @@ endif
 	@echo "Running CPU tests..."
 	@$(TEST_BIN)
 
+# Build and run batch FWHT tests
+test-batch: directories lib
+	@echo "Building batch test suite..."
+ifeq ($(USE_CUDA),1)
+	$(CXX) $(CXXFLAGS) $(TEST_DIR)/test_batch.c -L$(LIB_DIR) -lfwht $(CUDA_LDFLAGS) -o $(BUILD_DIR)/test_batch $(LDFLAGS) -lm -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
+else
+	$(CC) $(CFLAGS) $(TEST_DIR)/test_batch.c -L$(LIB_DIR) -lfwht -o $(BUILD_DIR)/test_batch $(LDFLAGS) -lm -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
+endif
+	@echo "Running batch tests..."
+	@$(BUILD_DIR)/test_batch
+
+# Build and run GPU callback tests
+test-gpu-callbacks: directories lib
+	@echo "Building GPU callback test suite..."
+ifeq ($(USE_CUDA),1)
+	$(CXX) $(CXXFLAGS) $(TEST_DIR)/test_gpu_callbacks.c -L$(LIB_DIR) -lfwht $(CUDA_LDFLAGS) -o $(BUILD_DIR)/test_gpu_callbacks $(LDFLAGS) -lm -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
+	@echo "Running GPU callback tests..."
+	@$(BUILD_DIR)/test_gpu_callbacks
+else
+	$(CC) $(CFLAGS) $(TEST_DIR)/test_gpu_callbacks.c -L$(LIB_DIR) -lfwht -o $(BUILD_DIR)/test_gpu_callbacks $(LDFLAGS) -lm -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
+	@echo "Running GPU callback tests (CUDA features disabled)..."
+	@$(BUILD_DIR)/test_gpu_callbacks
+endif
+
 # Clean build artifacts
 clean:
 	@echo "Cleaning build artifacts..."
 	rm -rf $(BUILD_DIR) $(LIB_DIR)
-	rm -f $(EXAMPLE_BIN)
+	rm -f $(EXAMPLE_BIN) $(EXAMPLE2_BIN)
 
 # Install library (requires sudo on most systems)
 install: lib

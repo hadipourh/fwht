@@ -213,6 +213,7 @@ TEST(size_large_4096) {
     }
     fwht_status_t status = fwht_i32(data, 4096);
     ASSERT_STATUS(status, FWHT_SUCCESS);
+    printf("DEBUG: data[0] = %d, expected = 4096\n", data[0]);
     ASSERT_EQ_I32(data[0], 4096);
     
     free(data);
@@ -435,6 +436,257 @@ TEST(consistency_i32_vs_f64) {
 }
 
 /* ============================================================================
+ * CRITICAL MISSING TESTS
+ * ============================================================================ */
+
+TEST(overflow_detection_i32) {
+    /* Test overflow detection in safe transform */
+    int32_t data[4];
+    
+    /* Case 1: Addition overflow (INT32_MAX + positive) */
+    data[0] = 2147483647;  /* INT32_MAX */
+    data[1] = 2;
+    data[2] = 0;
+    data[3] = 0;
+    fwht_status_t status = fwht_i32_safe(data, 4);
+    ASSERT_STATUS(status, FWHT_ERROR_OVERFLOW);
+    
+    /* Case 2: Subtraction overflow (INT32_MIN - positive) */
+    data[0] = -2147483648;  /* INT32_MIN */
+    data[1] = -2;
+    data[2] = 0;
+    data[3] = 0;
+    status = fwht_i32_safe(data, 4);
+    ASSERT_STATUS(status, FWHT_ERROR_OVERFLOW);
+    
+    /* Case 3: No overflow (safe values) */
+    data[0] = 1000;
+    data[1] = -500;
+    data[2] = 250;
+    data[3] = -125;
+    status = fwht_i32_safe(data, 4);
+    ASSERT_STATUS(status, FWHT_SUCCESS);
+}
+
+TEST(edge_case_size_1) {
+    /* WHT of size 1 is identity */
+    int32_t data[1] = {42};
+    fwht_status_t status = fwht_i32(data, 1);
+    ASSERT_STATUS(status, FWHT_SUCCESS);
+    ASSERT_EQ_I32(data[0], 42);
+    
+    /* Double precision */
+    double data_f64[1] = {3.14159};
+    status = fwht_f64(data_f64, 1);
+    ASSERT_STATUS(status, FWHT_SUCCESS);
+    ASSERT_NEAR_F64(data_f64[0], 3.14159, 1e-10);
+}
+
+TEST(edge_case_very_large) {
+    /* Test with n=65536 (2^16) */
+    size_t n = 65536;
+    int32_t* data = malloc(n * sizeof(int32_t));
+    ASSERT(data != NULL, "Memory allocation failed");
+    
+    /* Initialize with pattern */
+    for (size_t i = 0; i < n; i++) {
+        data[i] = (i & 1) ? -1 : 1;
+    }
+    
+    fwht_status_t status = fwht_i32(data, n);
+    ASSERT_STATUS(status, FWHT_SUCCESS);
+    
+    /* Apply inverse (WHT is self-inverse up to scaling) */
+    status = fwht_i32(data, n);
+    ASSERT_STATUS(status, FWHT_SUCCESS);
+    
+    /* Check involution property: WHT(WHT(f)) = n*f */
+    for (size_t i = 0; i < n; i++) {
+        int32_t expected = ((i & 1) ? -1 : 1) * (int32_t)n;
+        ASSERT_EQ_I32(data[i], expected);
+    }
+    
+    free(data);
+}
+
+TEST(backend_specific_cpu) {
+    /* Test CPU backend explicitly */
+    int32_t data[8] = {1, -1, -1, 1, -1, 1, 1, -1};
+    int32_t expected[8];
+    memcpy(expected, data, sizeof(data));
+    
+    /* Reference using default backend */
+    fwht_i32(expected, 8);
+    
+    /* Test CPU backend explicitly */
+    fwht_status_t status = fwht_i32_backend(data, 8, FWHT_BACKEND_CPU);
+    ASSERT_STATUS(status, FWHT_SUCCESS);
+    
+    /* Results should match */
+    for (int i = 0; i < 8; i++) {
+        ASSERT_EQ_I32(data[i], expected[i]);
+    }
+}
+
+TEST(backend_specific_openmp) {
+    /* Test OpenMP backend if available */
+    if (!fwht_has_openmp()) {
+        /* Skip if OpenMP not available */
+        return;
+    }
+    
+    int32_t data[256];
+    int32_t expected[256];
+    
+    /* Initialize */
+    for (int i = 0; i < 256; i++) {
+        data[i] = expected[i] = (i % 3 == 0) ? 1 : -1;
+    }
+    
+    /* Reference */
+    fwht_i32(expected, 256);
+    
+    /* Test OpenMP */
+    fwht_status_t status = fwht_i32_backend(data, 256, FWHT_BACKEND_OPENMP);
+    ASSERT_STATUS(status, FWHT_SUCCESS);
+    
+    /* Results should match */
+    for (int i = 0; i < 256; i++) {
+        ASSERT_EQ_I32(data[i], expected[i]);
+    }
+}
+
+TEST(out_of_place_backend_i32) {
+    /* Test out-of-place with backend selection */
+    int32_t input[8] = {1, -1, -1, 1, -1, 1, 1, -1};
+    int32_t reference[8];
+    memcpy(reference, input, sizeof(input));
+    
+    /* Compute with CPU backend */
+    int32_t* result = fwht_compute_i32_backend(input, 8, FWHT_BACKEND_CPU);
+    ASSERT(result != NULL, "Compute backend failed");
+    
+    /* Reference in-place */
+    fwht_i32(reference, 8);
+    
+    /* Input should be unchanged */
+    int32_t original[8] = {1, -1, -1, 1, -1, 1, 1, -1};
+    for (int i = 0; i < 8; i++) {
+        ASSERT_EQ_I32(input[i], original[i]);
+    }
+    
+    /* Result should match reference */
+    for (int i = 0; i < 8; i++) {
+        ASSERT_EQ_I32(result[i], reference[i]);
+    }
+    
+    free(result);
+}
+
+TEST(out_of_place_backend_f64) {
+    /* Test out-of-place float64 with backend selection */
+    double input[16];
+    double reference[16];
+    
+    for (int i = 0; i < 16; i++) {
+        input[i] = reference[i] = (i % 2) ? -1.0 : 1.0;
+    }
+    
+    /* Compute with CPU backend */
+    double* result = fwht_compute_f64_backend(input, 16, FWHT_BACKEND_CPU);
+    ASSERT(result != NULL, "Compute backend failed");
+    
+    /* Reference in-place */
+    fwht_f64(reference, 16);
+    
+    /* Result should match reference */
+    for (int i = 0; i < 16; i++) {
+        ASSERT_NEAR_F64(result[i], reference[i], 1e-10);
+    }
+    
+    free(result);
+}
+
+TEST(boolean_packed_backend) {
+    /* Test bit-packed Boolean WHT with backend selection */
+    uint8_t truth_table[8] = {0, 1, 1, 0, 1, 0, 0, 1};
+    
+    /* Pack into uint64 */
+    uint64_t packed = 0;
+    for (int i = 0; i < 8; i++) {
+        if (truth_table[i]) {
+            packed |= (1ULL << i);
+        }
+    }
+    
+    /* Compute with CPU backend */
+    int32_t result[8];
+    fwht_status_t status = fwht_boolean_packed_backend(&packed, result, 8, FWHT_BACKEND_CPU);
+    ASSERT_STATUS(status, FWHT_SUCCESS);
+    
+    /* Compare with unpacked version */
+    int32_t reference[8];
+    status = fwht_from_bool(truth_table, reference, 8, true);
+    ASSERT_STATUS(status, FWHT_SUCCESS);
+    
+    for (int i = 0; i < 8; i++) {
+        ASSERT_EQ_I32(result[i], reference[i]);
+    }
+}
+
+TEST(direct_batch_i32) {
+    /* Test direct batch API (non-context) */
+    int32_t data1[4] = {1, -1, -1, 1};
+    int32_t data2[4] = {1, 1, -1, -1};
+    int32_t data3[4] = {-1, -1, -1, -1};
+    int32_t* batch[3] = {data1, data2, data3};
+    
+    /* Compute reference */
+    int32_t ref1[4], ref2[4], ref3[4];
+    memcpy(ref1, data1, sizeof(data1));
+    memcpy(ref2, data2, sizeof(data2));
+    memcpy(ref3, data3, sizeof(data3));
+    fwht_i32(ref1, 4);
+    fwht_i32(ref2, 4);
+    fwht_i32(ref3, 4);
+    
+    /* Batch transform */
+    fwht_status_t status = fwht_i32_batch(batch, 4, 3);
+    ASSERT_STATUS(status, FWHT_SUCCESS);
+    
+    /* Verify all results */
+    for (int i = 0; i < 4; i++) {
+        ASSERT_EQ_I32(data1[i], ref1[i]);
+        ASSERT_EQ_I32(data2[i], ref2[i]);
+        ASSERT_EQ_I32(data3[i], ref3[i]);
+    }
+}
+
+TEST(direct_batch_f64) {
+    /* Test direct batch API for float64 */
+    double data1[8] = {1.0, -1.0, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0};
+    double data2[8] = {1.0, 1.0, 1.0, 1.0, -1.0, -1.0, -1.0, -1.0};
+    double* batch[2] = {data1, data2};
+    
+    /* Reference */
+    double ref1[8], ref2[8];
+    memcpy(ref1, data1, sizeof(data1));
+    memcpy(ref2, data2, sizeof(data2));
+    fwht_f64(ref1, 8);
+    fwht_f64(ref2, 8);
+    
+    /* Batch transform */
+    fwht_status_t status = fwht_f64_batch(batch, 8, 2);
+    ASSERT_STATUS(status, FWHT_SUCCESS);
+    
+    /* Verify */
+    for (int i = 0; i < 8; i++) {
+        ASSERT_NEAR_F64(data1[i], ref1[i], 1e-10);
+        ASSERT_NEAR_F64(data2[i], ref2[i], 1e-10);
+    }
+}
+
+/* ============================================================================
  * MAIN TEST RUNNER
  * ============================================================================ */
 
@@ -486,6 +738,18 @@ int main(void) {
     
     /* Consistency */
     run_test_consistency_i32_vs_f64();
+    
+        /* Critical missing tests */
+        run_test_overflow_detection_i32();
+        run_test_edge_case_size_1();
+        run_test_edge_case_very_large();
+        run_test_backend_specific_cpu();
+        run_test_backend_specific_openmp();
+        run_test_out_of_place_backend_i32();
+        run_test_out_of_place_backend_f64();
+        run_test_boolean_packed_backend();
+        run_test_direct_batch_i32();
+        run_test_direct_batch_f64();
     
     /* Summary */
     printf("\n===================================================================\n");

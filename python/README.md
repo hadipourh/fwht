@@ -10,6 +10,7 @@ Python bindings for the high-performance libfwht library, providing Fast Walsh-H
 - **Multiple backends**: Automatic selection or explicit choice of CPU (SIMD), OpenMP, or GPU (CUDA)
 - **All data types**: Support for `int8`, `int32`, and `float64` with overflow protection
 - **Boolean function analysis**: Convenience functions for cryptographic applications
+- **Bit-packed Boolean WHT**: Compute WHT directly from `uint64`-packed truth tables via `fwht.boolean_packed()`
 - **High performance**: 
   - Recursive cache-efficient algorithm (512-element L1-optimized base case)
   - Task-based OpenMP parallelism (2-3× speedup on 4-8 cores)
@@ -82,6 +83,28 @@ wht_coeffs = fwht.from_bool(truth_table, signed=True)
 correlations = fwht.correlations(truth_table)
 max_correlation = np.max(np.abs(correlations))
 print(f"Maximum absolute correlation: {max_correlation}")
+```
+
+### Bit-packed Boolean Functions
+
+```python
+import numpy as np
+import pyfwht as fwht
+
+# Pack [0,1,1,0,1,0,0,1] → bits 1,2,4,7 set (0x96)
+packed = np.array([0x96], dtype=np.uint64)
+wht = fwht.boolean_packed(packed, n=8)
+print(wht)
+
+# Larger example
+n = 256
+truth_table = np.random.randint(0, 2, size=n, dtype=np.uint8)
+n_words = (n + 63) // 64
+packed = np.zeros(n_words, dtype=np.uint64)
+for i in range(n):
+  if truth_table[i]:
+    packed[i // 64] |= (1 << (i % 64))
+wht2 = fwht.boolean_packed(packed, n=n)
 ```
 
 ### Backend Selection
