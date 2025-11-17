@@ -20,7 +20,7 @@ from . import _pyfwht
 from ._pyfwht import Backend, Config
 
 import numpy as np
-from typing import Optional, Union
+from typing import Optional, Union, Any
 
 # Re-export low-level C bindings for advanced users
 from ._pyfwht import (
@@ -35,6 +35,8 @@ from ._pyfwht import (
     fwht_compute_f64_backend as _fwht_compute_f64_backend,
     fwht_from_bool as _fwht_from_bool,
     fwht_correlations as _fwht_correlations,
+    fwht_boolean_packed as _fwht_boolean_packed,
+    fwht_boolean_packed_backend as _fwht_boolean_packed_backend,
     Context as _Context,
     is_power_of_2,
     log2,
@@ -46,6 +48,18 @@ from ._pyfwht import (
     default_config,
 )
 
+# GPU module (if available) – adapt to current bindings layout with submodule _pyfwht.gpu
+_GPU_AVAILABLE = False
+try:
+    # Import the pybind11 core module
+    from . import _pyfwht as _pb
+    # Check if the GPU submodule exists (built with USE_CUDA)
+    if hasattr(_pb, "gpu"):
+        _GPU_AVAILABLE = True
+except ImportError:
+    _pb = None  # type: ignore
+    _GPU_AVAILABLE = False
+
 __all__ = [
     '__version__',
     'Backend',
@@ -55,6 +69,7 @@ __all__ = [
     'compute',
     'from_bool',
     'correlations',
+    'boolean_packed',
     'is_power_of_2',
     'log2',
     'recommend_backend',
@@ -62,6 +77,7 @@ __all__ = [
     'has_gpu',
     'backend_name',
     'version',
+    'gpu',  # GPU module
 ]
 
 
@@ -110,6 +126,22 @@ def transform(
     if data.ndim != 1:
         raise ValueError("Input must be 1-dimensional")
     
+    # Accept legacy string backend specifiers (e.g., 'cpu','gpu') for backwards compatibility.
+    # pybind11 enum types are not subscriptable, so use getattr mapping.
+    if isinstance(backend, str):
+        name = backend.strip().lower()
+        mapping = {
+            'auto': Backend.AUTO,
+            'cpu': Backend.CPU,
+            'openmp': Backend.OPENMP,
+            'gpu': Backend.GPU,
+        }
+        if name not in mapping:
+            raise ValueError(
+                f"Unknown backend string '{backend}'. Expected one of: auto,cpu,openmp,gpu"
+            )
+        backend = mapping[name]
+
     if backend is None:
         backend = Backend.AUTO
     
@@ -258,6 +290,82 @@ def correlations(truth_table: np.ndarray) -> np.ndarray:
     return _fwht_correlations(truth_table)
 
 
+def boolean_packed(
+    packed_bits: np.ndarray,
+    n: int,
+    backend: Optional[Backend] = None
+) -> np.ndarray:
+    """
+    Compute WHT from bit-packed Boolean function (memory-efficient).
+    
+    This function is optimized for cryptanalysis applications where you
+    need to analyze many Boolean functions. By packing 64 Boolean values
+    into each uint64, you save 32× memory compared to unpacked representation.
+    
+    Parameters
+    ----------
+    packed_bits : np.ndarray
+        1-D array of uint64 containing bit-packed truth table.
+        Bit i of word j represents bool_func[j*64 + i].
+        Array should have length ceil(n/64).
+    n : int
+        Transform size (number of Boolean function inputs).
+        Must be power of 2, n ≤ 65536.
+    backend : Backend, optional
+        Backend selection (AUTO, CPU, OPENMP, GPU).
+        If None, uses AUTO backend.
+    
+    Returns
+    -------
+    np.ndarray
+        WHT coefficients as int32 array of length n.
+    
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import pyfwht as fwht
+    >>> 
+    >>> # Pack truth table [0,1,1,0,1,0,0,1] into single uint64
+    >>> # Bits 1,2,4,7 are set → 0b10010110 = 0x96
+    >>> packed = np.array([0x96], dtype=np.uint64)
+    >>> wht = fwht.boolean_packed(packed, n=8)
+    >>> print(wht)
+    
+    >>> # For larger functions, pack into multiple uint64s
+    >>> truth_table = np.random.randint(0, 2, 256, dtype=np.uint8)
+    >>> n_words = (256 + 63) // 64  # Need 4 words
+    >>> packed = np.zeros(n_words, dtype=np.uint64)
+    >>> for i in range(256):
+    ...     if truth_table[i]:
+    ...         word_idx = i // 64
+    ...         bit_idx = i % 64
+    ...         packed[word_idx] |= (1 << bit_idx)
+    >>> wht = fwht.boolean_packed(packed, n=256)
+    
+    Notes
+    -----
+    Memory savings: For n=65536, packed representation uses 1KB vs 256KB
+    for unpacked uint8 array (256× savings).
+    
+    The current implementation unpacks internally to use SIMD butterfly,
+    so performance is similar to unpacked version. Future GPU kernels
+    may provide significant speedup for truly bit-sliced operations.
+    """
+    if not isinstance(packed_bits, np.ndarray):
+        raise TypeError("Input must be a NumPy array")
+    
+    if packed_bits.dtype != np.uint64:
+        raise TypeError("Packed bits must have dtype uint64")
+    
+    if packed_bits.ndim != 1:
+        raise ValueError("Packed bits must be 1-dimensional")
+    
+    if backend is None:
+        return _fwht_boolean_packed(packed_bits, n)
+    else:
+        return _fwht_boolean_packed_backend(packed_bits, n, backend)
+
+
 class Context:
     """
     FWHT computation context for efficient repeated transforms.
@@ -354,3 +462,302 @@ class Context:
     
     def __del__(self):
         self.close()
+
+
+# ============================================================================
+# GPU Module
+# ============================================================================
+
+class GPUModule:
+    """
+    GPU-specific functionality for CUDA backend.
+    
+    Provides access to device information, profiling, batch operations,
+    and GPU contexts with persistent allocations.
+    
+    Attributes
+    ----------
+    available : bool
+        Whether GPU support is available.
+    
+    Examples
+    --------
+    >>> import pyfwht as fwht
+    >>> if fwht.gpu.available:
+    ...     print(f"Device: {fwht.gpu.device_name()}")
+    ...     print(f"Compute: {fwht.gpu.compute_capability()}")
+    """
+    
+    def __init__(self):
+           # Check GPU availability at runtime, not import time
+           # This handles cases where the module was built with CUDA but imported before GPU init
+           self.available = has_gpu()
+    
+    def device_name(self) -> str:
+        """Get GPU device name (e.g., 'NVIDIA H100')."""
+        if not self.available:
+            raise RuntimeError("GPU support not available")
+        # bindings: _pyfwht.gpu.Info.get_device_name()
+        return _pb.gpu.Info.get_device_name()
+    
+    def compute_capability(self) -> tuple:
+        """
+        Get CUDA compute capability as (major, minor) tuple.
+        
+        Returns
+        -------
+        tuple
+            (major, minor) version, e.g., (9, 0) for SM 9.0
+        """
+        if not self.available:
+            raise RuntimeError("GPU support not available")
+        cc = _pb.gpu.Info.get_compute_capability()
+        # bindings return e.g. 90 for SM 9.0; convert to (major, minor)
+        major = cc // 10
+        minor = cc % 10
+        return (major, minor)
+    
+    def sm_count(self) -> int:
+        """Get number of streaming multiprocessors."""
+        if not self.available:
+            raise RuntimeError("GPU support not available")
+        return _pb.gpu.Info.get_sm_count()
+    
+    def smem_banks(self) -> int:
+        """
+        Get shared memory bank count (16 or 32).
+        
+        Used for bank-aware padding optimization.
+        """
+        if not self.available:
+            raise RuntimeError("GPU support not available")
+        return _pb.gpu.Info.get_smem_banks()
+    
+    def set_profiling(self, enabled: bool) -> None:
+        """
+        Enable or disable detailed GPU profiling.
+        
+        When enabled, tracks H2D, kernel, and D2H timings separately.
+        
+        Parameters
+        ----------
+        enabled : bool
+            Whether to enable profiling.
+        """
+        if not self.available:
+            raise RuntimeError("GPU support not available")
+        _pb.gpu.Profiling.set_profiling(enabled)
+    
+    def profiling_enabled(self) -> bool:
+        """Check if GPU profiling is currently enabled."""
+        if not self.available:
+            raise RuntimeError("GPU support not available")
+        return _pb.gpu.Profiling.profiling_enabled()
+    
+    def get_last_metrics(self) -> Any:
+        """
+        Get profiling metrics from the last GPU operation.
+        
+        Returns
+        -------
+        GPUMetrics
+            Object with h2d_ms, kernel_ms, d2h_ms, n, batch_size,
+            bytes_transferred, samples, valid fields.
+        
+        Examples
+        --------
+        >>> import pyfwht as fwht
+        >>> fwht.gpu.set_profiling(True)
+        >>> data = np.random.randn(1024)
+        >>> fwht.transform(data, backend=fwht.Backend.GPU)
+        >>> metrics = fwht.gpu.get_last_metrics()
+        >>> print(f"Kernel: {metrics.kernel_ms:.3f} ms")
+        """
+        if not self.available:
+            raise RuntimeError("GPU support not available")
+        return _pb.gpu.Profiling.get_last_metrics()
+    
+    def batch_transform_i32(self, batch: np.ndarray) -> None:
+        """
+        In-place batch transform for int32 arrays.
+        
+        Parameters
+        ----------
+        batch : np.ndarray
+            2-D array of shape (batch_size, n) with dtype int32.
+            Each row is transformed independently.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyfwht as fwht
+        >>> batch = np.random.randint(-100, 100, (16, 256), dtype=np.int32)
+        >>> fwht.gpu.batch_transform_i32(batch)
+        """
+        if not self.available:
+            raise RuntimeError("GPU support not available")
+        if not isinstance(batch, np.ndarray):
+            raise TypeError("Input must be a NumPy array")
+        if batch.ndim != 2:
+            raise ValueError("Input must be 2-dimensional (batch_size, n)")
+        if batch.dtype != np.int32:
+            raise TypeError("Input must have dtype int32")
+        # bindings: function requires data, n, batch_size
+        n = batch.shape[1]
+        bsz = batch.shape[0]
+        _pb.gpu.batch_i32(batch, int(n), int(bsz))
+    
+    def batch_transform_f64(self, batch: np.ndarray) -> None:
+        """
+        In-place batch transform for float64 arrays.
+        
+        Parameters
+        ----------
+        batch : np.ndarray
+            2-D array of shape (batch_size, n) with dtype float64.
+            Each row is transformed independently.
+        """
+        if not self.available:
+            raise RuntimeError("GPU support not available")
+        if not isinstance(batch, np.ndarray):
+            raise TypeError("Input must be a NumPy array")
+        if batch.ndim != 2:
+            raise ValueError("Input must be 2-dimensional (batch_size, n)")
+        if batch.dtype != np.float64:
+            raise TypeError("Input must have dtype float64")
+        n = batch.shape[1]
+        bsz = batch.shape[0]
+        _pb.gpu.batch_f64(batch, int(n), int(bsz))
+    
+    def set_multi_shuffle(self, enabled: bool) -> None:
+        """
+        Enable or disable multi-shuffle optimization for N in (32, 512].
+        
+        Multi-shuffle uses warp-level primitives for medium sizes,
+        potentially faster than shared memory on some GPUs.
+        Default: disabled (uses shared memory instead).
+        
+        Parameters
+        ----------
+        enabled : bool
+            Whether to enable multi-shuffle.
+        """
+        if not self.available:
+            raise RuntimeError("GPU support not available")
+        _pb.gpu.Toggles.set_multi_shuffle(enabled)
+    
+    def multi_shuffle_enabled(self) -> bool:
+        """Check if multi-shuffle optimization is enabled."""
+        if not self.available:
+            raise RuntimeError("GPU support not available")
+        return _pb.gpu.Toggles.multi_shuffle_enabled()
+    
+    def Context(
+        self,
+        max_n: int = 1024,
+        batch_size: int = 1
+    ):
+        """
+        Create a GPU context with persistent device allocations.
+        
+        Avoids repeated cudaMalloc/cudaFree overhead for
+        applications computing many transforms of fixed size.
+        
+        Parameters
+        ----------
+        max_n : int, default=1024
+            Maximum transform size to pre-allocate for.
+        batch_size : int, default=1
+            Batch size to pre-allocate for.
+        
+        Returns
+        -------
+        GPUContext
+            Context object with transform methods.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyfwht as fwht
+        >>> with fwht.gpu.Context(max_n=512, batch_size=8) as ctx:
+        ...     for _ in range(100):
+        ...         data = np.random.randn(512)
+        ...         ctx.transform_f64(data)
+        """
+        if not self.available:
+            raise RuntimeError("GPU support not available")
+        return GPUContext(max_n, batch_size)
+
+
+class GPUContext:
+    """
+    GPU computation context with persistent device memory.
+    
+    Do not instantiate directly; use `fwht.gpu.Context()` instead.
+    """
+    
+    def __init__(self, max_n: int, batch_size: int):
+        # bindings: GPU Context class under submodule
+        self._ctx = _pb.gpu.Context(int(max_n), int(batch_size))
+        self._closed = False
+    
+    def transform_i32(self, data: np.ndarray) -> None:
+        """
+        In-place int32 transform using pre-allocated GPU memory.
+        
+        Parameters
+        ----------
+        data : np.ndarray
+            1-D array of int32, length <= max_n.
+        """
+        if self._closed:
+            raise RuntimeError("Context is closed")
+        if not isinstance(data, np.ndarray):
+            raise TypeError("Input must be a NumPy array")
+        if data.ndim != 1:
+            raise ValueError("Input must be 1-dimensional")
+        if data.dtype != np.int32:
+            raise TypeError("Input must have dtype int32")
+        n = data.shape[0]
+        self._ctx.compute_i32(data, int(n), 1)
+    
+    def transform_f64(self, data: np.ndarray) -> None:
+        """
+        In-place float64 transform using pre-allocated GPU memory.
+        
+        Parameters
+        ----------
+        data : np.ndarray
+            1-D array of float64, length <= max_n.
+        """
+        if self._closed:
+            raise RuntimeError("Context is closed")
+        if not isinstance(data, np.ndarray):
+            raise TypeError("Input must be a NumPy array")
+        if data.ndim != 1:
+            raise ValueError("Input must be 1-dimensional")
+        if data.dtype != np.float64:
+            raise TypeError("Input must have dtype float64")
+        n = data.shape[0]
+        self._ctx.compute_f64(data, int(n), 1)
+    
+    def close(self) -> None:
+        """Free GPU resources."""
+        if not self._closed:
+            # pybind class exposes close()
+            self._ctx.close()
+            self._closed = True
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+    
+    def __del__(self):
+        self.close()
+
+
+# Create singleton GPU module instance
+gpu = GPUModule()

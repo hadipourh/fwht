@@ -169,10 +169,19 @@ if cuda_available:
             '--std=c++11',
             '-O3'
         ]
+        # Allow users to append extra NVCC flags via environment (e.g., gencodes or std)
+        extra_nvcc = os.environ.get('FWHT_NVCC_FLAGS', '').strip()
+        if extra_nvcc:
+            nvcc_cmd.extend(extra_nvcc.split())
+        print('NVCC command:', ' '.join(nvcc_cmd))
         
         result = subprocess.run(nvcc_cmd, capture_output=True, text=True)
         if result.returncode != 0:
-            print(f"NVCC Error:\n{result.stderr}")
+            # Print both stdout and stderr to aid debugging in CI/pip wrapper
+            if result.stdout:
+                print("NVCC stdout:\n" + result.stdout)
+            if result.stderr:
+                print("NVCC stderr:\n" + result.stderr)
             raise RuntimeError("Failed to compile CUDA source")
         
         cuda_objects = [str(cuda_obj)]

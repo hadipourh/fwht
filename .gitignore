@@ -24,3 +24,10 @@ python/build_env/
 python/c_src/
 python/include/
 python/venv/
+
+# Example binaries
+examples/example_basic
+examples/example_boolean_packed
+
+# Generic Python caches
+**/__pycache__/
