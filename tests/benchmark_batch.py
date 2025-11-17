@@ -49,15 +49,19 @@ def benchmark_meta_batch(n, batch_size, repeats=100, warmup=10):
         _ = fast_hadamard_transform.hadamard_transform(data, scale=1.0)
     torch.cuda.synchronize()
     
-    # Timed runs
+    # Timed runs - MEASURE ACTUAL WORK
     times = []
     for _ in range(repeats):
+        # Create fresh data each time to avoid caching
+        test_data = torch.randn(batch_size, n, dtype=torch.float16, device='cuda')
         torch.cuda.synchronize()
         start = time.perf_counter()
-        _ = fast_hadamard_transform.hadamard_transform(data, scale=1.0)
+        result = fast_hadamard_transform.hadamard_transform(test_data, scale=1.0)
         torch.cuda.synchronize()
         elapsed = time.perf_counter() - start
         times.append(elapsed * 1000)  # ms
+        # Force materialization
+        _ = result[0, 0].item()
     
     return np.mean(times), np.std(times)
 

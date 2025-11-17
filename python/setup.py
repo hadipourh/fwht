@@ -90,7 +90,7 @@ print("=" * 70)
 extra_compile_args = ['-O3', '-std=c++11', '-fPIC']
 extra_link_args = []
 define_macros = []
-include_dirs_list = [str(INCLUDE_DIR)]
+include_dirs_list = [str(INCLUDE_DIR), str(PYTHON_DIR / "include")]  # Add DLPack include path
 
 # Platform-specific optimizations
 if sys.platform == 'darwin':  # macOS
