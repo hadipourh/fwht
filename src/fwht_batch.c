@@ -30,11 +30,9 @@ static void* fwht_aligned_alloc(size_t alignment, size_t size) {
     }
     return NULL;
 #else
-    /* Fallback: use malloc with manual alignment (slower but works) */
-    void* raw = malloc(size + alignment);
-    if (raw == NULL) return NULL;
-    void* aligned = (void*)(((uintptr_t)raw + alignment) & ~(alignment - 1));
-    return aligned;
+    /* Fallback: just use malloc (alignment not guaranteed but safe to free) */
+    (void)alignment;  /* Suppress unused parameter warning */
+    return malloc(size);
 #endif
 }
 

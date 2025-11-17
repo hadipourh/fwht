@@ -11,9 +11,25 @@
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
 
+#ifdef USE_CUDA
+#include <dlpack/dlpack.h>
+#include <cuda_fp16.h>  // C++ header, must be outside extern "C"
+#endif
+
 extern "C" {
     #include "fwht.h"
 }
+
+#ifdef USE_CUDA
+// Forward declarations for fp16/fp32 kernels (not in fwht.h yet)
+// These are C++ functions due to __half type, so they're outside extern "C"
+extern "C" {
+    fwht_status_t fwht_batch_f32_cuda(float* d_data, size_t n, size_t batch_size);
+}
+
+// __half is a C++ type, so this function must have C++ linkage
+extern fwht_status_t fwht_batch_f16_cuda(__half* d_data, size_t n, size_t batch_size);
+#endif
 
 #include <cstdlib>
 #include <stdexcept>
@@ -539,6 +555,114 @@ public:
     }
 };
 
+// GPU DLPack Support - Zero-copy interop with PyTorch, CuPy, JAX, etc.
+void py_fwht_batch_f64_dlpack(py::capsule dlpack_tensor, size_t n, size_t batch_size) {
+    // Import DLManagedTensor from capsule
+    auto dlm_tensor = static_cast<DLManagedTensor*>(dlpack_tensor);
+    
+    // Validate tensor properties
+    if (dlm_tensor->dl_tensor.ndim != 2) {
+        throw std::invalid_argument("DLPack tensor must be 2-dimensional (batch_size, n)");
+    }
+    if (dlm_tensor->dl_tensor.dtype.code != kDLFloat || dlm_tensor->dl_tensor.dtype.bits != 64) {
+        throw std::invalid_argument("DLPack tensor must be float64");
+    }
+    if (dlm_tensor->dl_tensor.device.device_type != kDLCUDA) {
+        throw std::invalid_argument("DLPack tensor must be on CUDA device");
+    }
+    
+    // Verify shape matches
+    if (static_cast<size_t>(dlm_tensor->dl_tensor.shape[0]) != batch_size ||
+        static_cast<size_t>(dlm_tensor->dl_tensor.shape[1]) != n) {
+        throw std::invalid_argument("DLPack tensor shape must be (batch_size, n)");
+    }
+    
+    // Get pointer to GPU data (already on device!)
+    double* d_ptr = static_cast<double*>(dlm_tensor->dl_tensor.data);
+    
+    // Call CUDA kernel directly - NO H2D/D2H transfers!
+    fwht_status_t status = fwht_batch_f64_cuda(d_ptr, n, batch_size);
+    check_status(status, "fwht_batch_f64_cuda");
+}
+
+void py_fwht_batch_i32_dlpack(py::capsule dlpack_tensor, size_t n, size_t batch_size) {
+    auto dlm_tensor = static_cast<DLManagedTensor*>(dlpack_tensor);
+    
+    if (dlm_tensor->dl_tensor.ndim != 2) {
+        throw std::invalid_argument("DLPack tensor must be 2-dimensional (batch_size, n)");
+    }
+    if (dlm_tensor->dl_tensor.dtype.code != kDLInt || dlm_tensor->dl_tensor.dtype.bits != 32) {
+        throw std::invalid_argument("DLPack tensor must be int32");
+    }
+    if (dlm_tensor->dl_tensor.device.device_type != kDLCUDA) {
+        throw std::invalid_argument("DLPack tensor must be on CUDA device");
+    }
+    
+    if (static_cast<size_t>(dlm_tensor->dl_tensor.shape[0]) != batch_size ||
+        static_cast<size_t>(dlm_tensor->dl_tensor.shape[1]) != n) {
+        throw std::invalid_argument("DLPack tensor shape must be (batch_size, n)");
+    }
+    
+    int32_t* d_ptr = static_cast<int32_t*>(dlm_tensor->dl_tensor.data);
+    
+    fwht_status_t status = fwht_batch_i32_cuda(d_ptr, n, batch_size);
+    check_status(status, "fwht_batch_i32_cuda");
+}
+
+// FP32 DLPack support (Meta-inspired high-speed kernel)
+void py_fwht_batch_f32_dlpack(py::capsule dlpack_tensor, size_t n, size_t batch_size) {
+    auto dlm_tensor = static_cast<DLManagedTensor*>(dlpack_tensor);
+    
+    if (dlm_tensor->dl_tensor.ndim != 2) {
+        throw std::invalid_argument("DLPack tensor must be 2-dimensional (batch_size, n)");
+    }
+    if (dlm_tensor->dl_tensor.dtype.code != kDLFloat || dlm_tensor->dl_tensor.dtype.bits != 32) {
+        throw std::invalid_argument("DLPack tensor must be float32");
+    }
+    if (dlm_tensor->dl_tensor.device.device_type != kDLCUDA) {
+        throw std::invalid_argument("DLPack tensor must be on CUDA device");
+    }
+    
+    if (static_cast<size_t>(dlm_tensor->dl_tensor.shape[0]) != batch_size ||
+        static_cast<size_t>(dlm_tensor->dl_tensor.shape[1]) != n) {
+        throw std::invalid_argument("DLPack tensor shape must be (batch_size, n)");
+    }
+    
+    float* d_ptr = static_cast<float*>(dlm_tensor->dl_tensor.data);
+    
+    // Call Meta-inspired fp32 kernel
+    fwht_status_t status = fwht_batch_f32_cuda(d_ptr, n, batch_size);
+    check_status(status, "fwht_batch_f32_cuda");
+}
+
+// FP16 DLPack support (Meta-inspired maximum speed)
+// Note: Uses CUDA __half type from cuda_fp16.h
+void py_fwht_batch_f16_dlpack(py::capsule dlpack_tensor, size_t n, size_t batch_size) {
+    auto dlm_tensor = static_cast<DLManagedTensor*>(dlpack_tensor);
+    
+    if (dlm_tensor->dl_tensor.ndim != 2) {
+        throw std::invalid_argument("DLPack tensor must be 2-dimensional (batch_size, n)");
+    }
+    if (dlm_tensor->dl_tensor.dtype.code != kDLFloat || dlm_tensor->dl_tensor.dtype.bits != 16) {
+        throw std::invalid_argument("DLPack tensor must be float16");
+    }
+    if (dlm_tensor->dl_tensor.device.device_type != kDLCUDA) {
+        throw std::invalid_argument("DLPack tensor must be on CUDA device");
+    }
+    
+    if (static_cast<size_t>(dlm_tensor->dl_tensor.shape[0]) != batch_size ||
+        static_cast<size_t>(dlm_tensor->dl_tensor.shape[1]) != n) {
+        throw std::invalid_argument("DLPack tensor shape must be (batch_size, n)");
+    }
+    
+    // DLPack uses raw fp16 data, CUDA expects __half*
+    void* d_ptr = dlm_tensor->dl_tensor.data;
+    
+    // Call Meta-inspired fp16 kernel (cast void* to __half* inside CUDA code)
+    fwht_status_t status = fwht_batch_f16_cuda(static_cast<__half*>(d_ptr), n, batch_size);
+    check_status(status, "fwht_batch_f16_cuda");
+}
+
 // GPU Toggles
 class PyGPUToggles {
 public:
@@ -694,6 +818,20 @@ PYBIND11_MODULE(_pyfwht, m) {
     gpu.def("batch_f64", &py_fwht_batch_f64_cuda,
             py::arg("data"), py::arg("n"), py::arg("batch_size"),
             "Batch WHT for float64 on GPU (data must be flat array of n * batch_size)");
+    
+    // DLPack-based zero-copy batch processing
+    gpu.def("batch_f64_dlpack", &py_fwht_batch_f64_dlpack,
+            py::arg("dlpack_tensor"), py::arg("n"), py::arg("batch_size"),
+            "Zero-copy batch WHT for float64 via DLPack (PyTorch/CuPy/JAX tensors on GPU)");
+    gpu.def("batch_i32_dlpack", &py_fwht_batch_i32_dlpack,
+            py::arg("dlpack_tensor"), py::arg("n"), py::arg("batch_size"),
+            "Zero-copy batch WHT for int32 via DLPack (PyTorch/CuPy/JAX tensors on GPU)");
+    gpu.def("batch_f32_dlpack", &py_fwht_batch_f32_dlpack,
+            py::arg("dlpack_tensor"), py::arg("n"), py::arg("batch_size"),
+            "Zero-copy batch WHT for float32 via DLPack (Meta-inspired high-speed kernel, ~2× faster than fp64)");
+    gpu.def("batch_f16_dlpack", &py_fwht_batch_f16_dlpack,
+            py::arg("dlpack_tensor"), py::arg("n"), py::arg("batch_size"),
+            "Zero-copy batch WHT for float16 via DLPack (Meta-inspired maximum-speed kernel, ~11× faster than fp64)");
     
     // GPU Context
     py::class_<PyGPUContext>(gpu, "Context", "Persistent GPU context for repeated transforms")

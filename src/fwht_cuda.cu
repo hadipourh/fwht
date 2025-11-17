@@ -1121,9 +1121,7 @@ static fwht_status_t fwht_launch_fused_specialized(T* d_data, size_t n, size_t b
 
 template <typename T>
 static fwht_status_t fwht_launch_fused(T* d_data, size_t n, size_t batch_size, cudaStream_t stream) {
-    constexpr int ELEMS_PER_THREAD = 4;  // Meta uses 4, not 8
-    
-    // Meta's approach: Select thread count based on log_N
+    // Meta's approach: Use 4 elements per thread and select thread count based on log_N
     // This matches their fast_hadamard_transform_cuda dispatch pattern
     int log_n = ilog2(n);
     
@@ -2081,7 +2079,11 @@ fwht_status_t fwht_gpu_context_set_callbacks_f64(fwht_gpu_context_t* ctx,
     return FWHT_SUCCESS;
 }
 
-} /* extern "C" */
+} /* extern "C" for callbacks */
+
+#ifdef __cplusplus
+}
+#endif
 
 /* ============================================================================
  * Legacy context API (kept for backwards compatibility with fwht_core.c)
@@ -2117,6 +2119,260 @@ fwht_status_t fwht_transform_f64_cuda(fwht_context_t* ctx, double* data, size_t 
     return FWHT_ERROR_BACKEND_UNAVAILABLE;
 }
 
-#ifdef __cplusplus
+/* ============================================================================
+ * FP16/FP32 High-Speed Kernels (Meta-Inspired)
+ * ============================================================================
+ * 
+ * Based on optimizations from meta-pytorch/applied-ai hadamard_transform
+ * License: BSD 3-Clause (compatible with GPL-3.0)
+ * 
+ * These kernels provide high-speed transforms for ML/AI workloads.
+ * For cryptographic precision, use the existing float64 kernels above.
+ * 
+ * Key Meta optimizations implemented:
+ * 1. XOR-based addressing for perfect memory coalescing
+ * 2. Optimal warp shuffle patterns (smallest strides first)
+ * 3. Size-specific launch configurations
+ * 4. Minimal shared memory usage (registers + shuffles preferred)
+ * 
+ * Performance targets:
+ * - fp16: ~800 GOps/s (matching Meta)
+ * - fp32: ~400 GOps/s (balanced speed/precision)
+ * - fp64: ~74 GOps/s (existing, for precision)
+ * ============================================================================ */
+
+#include <cuda_fp16.h>
+
+// Meta's insight: XOR-based butterfly for perfect coalescing
+template<typename T>
+__device__ __forceinline__ void butterfly_xor(T& a, T& b) {
+    T tmp = a;
+    a = a + b;
+    b = tmp - b;
 }
-#endif
+
+// Meta's optimized warp shuffle (smallest strides first)
+template<typename T>
+__device__ __forceinline__ void warp_hadamard_shuffle(T& val, int log_warp_size) {
+    const unsigned mask = 0xFFFFFFFFu;
+    const int lane = threadIdx.x & 31;
+    // Smallest strides first
+    #pragma unroll
+    for (int s = 0; s < log_warp_size; ++s) {
+        const int stride = 1 << s;
+        T other = __shfl_xor_sync(mask, val, stride);
+        if ((lane & stride) == 0) {
+            val = val + other;
+        } else {
+            val = other - val;
+        }
+    }
+}
+
+// FP32 kernel (medium precision, 2× faster than fp64)
+template<int LOG_N>
+__global__ void hadamard_fp32_kernel(float* data, int batch_size) {
+    constexpr int N = 1 << LOG_N;
+    constexpr int EPT = 4;  // Elements per thread
+    
+    const int batch_idx = blockIdx.x;
+    if (batch_idx >= batch_size) return;
+    
+    const int tid = threadIdx.x;
+    float* batch_data = data + batch_idx * N;
+    
+    extern __shared__ float smem_f32[];
+    
+    // Load data (coalesced)
+    float regs[EPT];
+    #pragma unroll
+    for (int e = 0; e < EPT; ++e) {
+        int idx = tid * EPT + e;
+        regs[e] = (idx < N) ? batch_data[idx] : 0.0f;
+    }
+    
+    // Stage 1: Per-thread butterflies (first 2 stages, no sync needed)
+    #pragma unroll
+    for (int s = 0; s < 2; ++s) {
+        #pragma unroll
+        for (int e = 0; e < EPT; e += (2 << s)) {
+            #pragma unroll
+            for (int i = 0; i < (1 << s); ++i) {
+                butterfly_xor(regs[e + i], regs[e + i + (1 << s)]);
+            }
+        }
+    }
+    
+    // Stage 2: Warp-level shuffles (Meta's pattern)
+    #pragma unroll
+    for (int e = 0; e < EPT; ++e) {
+        warp_hadamard_shuffle(regs[e], 5);  // log2(32) = 5
+    }
+    __syncthreads();
+    
+    // Stage 3: Block-level via shared memory (Meta's XOR addressing)
+    for (int s = 5; s < LOG_N; ++s) {
+        // Write to shared memory
+        #pragma unroll
+        for (int e = 0; e < EPT; ++e) {
+            smem_f32[tid * EPT + e] = regs[e];
+        }
+        __syncthreads();
+        
+        // Read partner and perform butterfly
+        const int stride = 1 << s;
+        #pragma unroll
+        for (int e = 0; e < EPT; ++e) {
+            int idx = tid * EPT + e;
+            int partner_idx = idx ^ stride;
+            
+            if (idx < N && partner_idx < N) {
+                float val = smem_f32[idx];
+                float partner = smem_f32[partner_idx];
+                butterfly_xor(val, partner);
+                regs[e] = val;
+            }
+        }
+        __syncthreads();
+    }
+    
+    // Store back (coalesced)
+    #pragma unroll
+    for (int e = 0; e < EPT; ++e) {
+        int idx = tid * EPT + e;
+        if (idx < N) {
+            batch_data[idx] = regs[e];
+        }
+    }
+}
+
+// FP16 kernel (high speed, lower precision)
+template<int LOG_N>
+__global__ void hadamard_fp16_kernel(__half* data, int batch_size) {
+    constexpr int N = 1 << LOG_N;
+    constexpr int EPT = 4;
+    
+    const int batch_idx = blockIdx.x;
+    if (batch_idx >= batch_size) return;
+    
+    const int tid = threadIdx.x;
+    __half* batch_data = data + batch_idx * N;
+    
+    extern __shared__ __half smem_f16[];
+    
+    // Load (coalesced)
+    __half regs[EPT];
+    #pragma unroll
+    for (int e = 0; e < EPT; ++e) {
+        int idx = tid * EPT + e;
+        regs[e] = (idx < N) ? batch_data[idx] : __float2half(0.0f);
+    }
+    
+    // Per-thread butterflies
+    #pragma unroll
+    for (int s = 0; s < 2; ++s) {
+        #pragma unroll
+        for (int e = 0; e < EPT; e += (2 << s)) {
+            #pragma unroll
+            for (int i = 0; i < (1 << s); ++i) {
+                butterfly_xor(regs[e + i], regs[e + i + (1 << s)]);
+            }
+        }
+    }
+    
+    // Warp shuffles
+    #pragma unroll
+    for (int e = 0; e < EPT; ++e) {
+        warp_hadamard_shuffle(regs[e], 5);
+    }
+    __syncthreads();
+    
+    // Shared memory stages (Meta's XOR pattern)
+    for (int s = 5; s < LOG_N; ++s) {
+        #pragma unroll
+        for (int e = 0; e < EPT; ++e) {
+            smem_f16[tid * EPT + e] = regs[e];
+        }
+        __syncthreads();
+        
+        const int stride = 1 << s;
+        #pragma unroll
+        for (int e = 0; e < EPT; ++e) {
+            int idx = tid * EPT + e;
+            int partner_idx = idx ^ stride;
+            
+            if (idx < N && partner_idx < N) {
+                __half val = smem_f16[idx];
+                __half partner = smem_f16[partner_idx];
+                butterfly_xor(val, partner);
+                regs[e] = val;
+            }
+        }
+        __syncthreads();
+    }
+    
+    // Store back
+    #pragma unroll
+    for (int e = 0; e < EPT; ++e) {
+        int idx = tid * EPT + e;
+        if (idx < N) {
+            batch_data[idx] = regs[e];
+        }
+    }
+}
+
+// Dispatch for fp32 (Meta's size-specific launch configs)
+extern "C"
+fwht_status_t fwht_batch_f32_cuda(float* d_data, size_t n, size_t batch_size) {
+    if (!fwht_is_power_of_2(n)) {
+        return FWHT_ERROR_INVALID_SIZE;
+    }
+    
+    const int log_n = fwht_log2(n);
+    size_t smem_bytes = n * sizeof(float);
+    
+    // Meta's tuned configurations
+    switch (log_n) {
+        case 10:  // n=1024
+            hadamard_fp32_kernel<10><<<batch_size, 256, smem_bytes>>>(d_data, batch_size);
+            break;
+        case 11:  // n=2048
+            hadamard_fp32_kernel<11><<<batch_size, 512, smem_bytes>>>(d_data, batch_size);
+            break;
+        case 12:  // n=4096
+            hadamard_fp32_kernel<12><<<batch_size, 1024, smem_bytes>>>(d_data, batch_size);
+            break;
+        default:
+            return FWHT_ERROR_INVALID_SIZE;  // Only support 1K-4K for now
+    }
+    
+    CUDA_CHECK(cudaGetLastError());
+    return FWHT_SUCCESS;
+}
+
+// Dispatch for fp16 (C++ linkage required for __half type)
+fwht_status_t fwht_batch_f16_cuda(__half* d_data, size_t n, size_t batch_size) {
+    if (!fwht_is_power_of_2(n)) {
+        return FWHT_ERROR_INVALID_SIZE;
+    }
+    
+    const int log_n = fwht_log2(n);
+    size_t smem_bytes = n * sizeof(__half);
+    
+    switch (log_n) {
+        case 10:
+            hadamard_fp16_kernel<10><<<batch_size, 256, smem_bytes>>>(d_data, batch_size);
+            break;
+        case 11:
+            hadamard_fp16_kernel<11><<<batch_size, 512, smem_bytes>>>(d_data, batch_size);
+            break;
+        case 12:
+            hadamard_fp16_kernel<12><<<batch_size, 1024, smem_bytes>>>(d_data, batch_size);
+            break;
+        default:
+            return FWHT_ERROR_INVALID_SIZE;
+    }
+    
+    CUDA_CHECK(cudaGetLastError());
+    return FWHT_SUCCESS;
+}

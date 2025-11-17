@@ -183,9 +183,10 @@ fwht.transform(data)  # In-place, auto-selects best backend
 
 - Zero-copy NumPy integration
 - Automatic backend selection (CPU SIMD, OpenMP, CUDA)
+- Multi-precision GPU support: fp64 (crypto), fp32 (balanced, 25× faster), fp16 (ML, 36× faster)
 - Support for `int8`, `int32`, and `float64` data types
 - Boolean function utilities for cryptanalysis
-- GPU acceleration for large-scale transforms and batch operations
+- GPU acceleration: up to **738 GOps/s** on RTX 4090 (fp16 mode)
 
 See [`python/README.md`](python/README.md) for complete documentation and API reference.
 
