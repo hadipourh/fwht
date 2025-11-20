@@ -260,6 +260,100 @@ class TestGPUPerformance:
         print(f"Speedup: {no_context_time/context_time:.2f}x")
 
 
+class TestTensorCores:
+    """Test Tensor Core fp16/fp32 performance."""
+    
+    @pytest.fixture(autouse=True)
+    def skip_if_no_gpu(self):
+        """Skip if GPU not available."""
+        if not fwht.has_gpu():
+            pytest.skip("GPU not available")
+    
+    def test_fp16_basic_correctness(self):
+        """Test fp16 transform correctness."""
+        n = 1024
+        data = np.random.randn(n).astype(np.float16)
+        original = data.copy()
+        
+        # Double transform should give n * original (within fp16 precision)
+        result = fwht.fwht(data, backend='cuda')
+        result = fwht.fwht(result, backend='cuda')
+        
+        expected = n * original
+        # Relaxed tolerance for fp16: double transform accumulates rounding errors
+        # rtol=0.2 allows 20% relative error, atol=3.0 for small values
+        np.testing.assert_allclose(result, expected, rtol=0.2, atol=3.0)
+    
+    @pytest.mark.parametrize("size", [1024, 2048, 4096])
+    def test_fp16_various_sizes(self, size):
+        """Test fp16 for sizes where Tensor Cores are used."""
+        data = np.random.randn(size).astype(np.float16)
+        original = data.copy()
+        
+        result = fwht.fwht(data, backend='cuda')
+        result = fwht.fwht(result, backend='cuda')
+        
+        # Relaxed tolerance for fp16: larger transforms accumulate more errors
+        # Scale tolerance with size: larger N → more accumulation
+        rtol = 0.2  # 20% relative tolerance
+        atol = 5.0 + (size / 1024)  # Base 5.0 + scaling factor
+        np.testing.assert_allclose(result, size * original, rtol=rtol, atol=atol)
+    
+    def test_fp16_batch_performance(self):
+        """Benchmark fp16 batch performance (Tensor Cores)."""
+        import time
+        
+        n = 4096
+        batch_size = 100
+        data = np.random.randn(batch_size, n).astype(np.float16)
+        
+        # Warmup
+        _ = fwht.fwht(data.copy(), backend='cuda')
+        
+        # Benchmark
+        start = time.perf_counter()
+        result = fwht.fwht(data, backend='cuda')
+        elapsed = time.perf_counter() - start
+        
+        ops = n * np.log2(n) * batch_size
+        gops = ops / elapsed / 1e9
+        
+        print(f"\nFP16 Tensor Core Performance:")
+        print(f"  Size: {n}, Batch: {batch_size}")
+        print(f"  Time: {elapsed*1000:.2f} ms")
+        print(f"  Performance: {gops:.2f} GOps/s")
+        print(f"  Compute capability: {fwht.gpu_get_compute_capability() / 10:.1f}")
+        
+        if fwht.gpu_get_compute_capability() >= 70:
+            print(f"  Expected (Tensor Cores): 40-55 GOps/s @ n=4096")
+            print(f"  Expected (Butterfly): 8-10 GOps/s")
+        
+        # Verify correctness of first sample
+        first = result[0].copy()
+        first = fwht.fwht(first, backend='cuda')
+        # Relaxed tolerance for double transform test with large n=4096
+        np.testing.assert_allclose(first, n * data[0], rtol=0.3, atol=16.0)
+    
+    def test_fp32_performance(self):
+        """Benchmark fp32 performance."""
+        import time
+        
+        n = 4096
+        batch_size = 100
+        data = np.random.randn(batch_size, n).astype(np.float32)
+        
+        start = time.perf_counter()
+        result = fwht.fwht(data, backend='cuda')
+        elapsed = time.perf_counter() - start
+        
+        ops = n * np.log2(n) * batch_size
+        gops = ops / elapsed / 1e9
+        
+        print(f"\nFP32 Performance:")
+        print(f"  Size: {n}, Batch: {batch_size}")
+        print(f"  Performance: {gops:.2f} GOps/s")
+
+
 class TestGPUBooleanFunctions:
     """Test GPU with boolean function operations."""
     

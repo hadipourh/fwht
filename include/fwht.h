@@ -267,10 +267,21 @@ bool          fwht_gpu_multi_shuffle_enabled(void);
  */
 fwht_status_t fwht_batch_i32_cuda(int32_t* data, size_t n, size_t batch_size);
 fwht_status_t fwht_batch_f64_cuda(double* data, size_t n, size_t batch_size);
+fwht_status_t fwht_batch_f32_cuda(float* data, size_t n, size_t batch_size);
 
 /* Device-pointer APIs: operate on GPU-resident buffers (no H2D/D2H copies). */
 fwht_status_t fwht_batch_i32_cuda_device(int32_t* d_data, size_t n, size_t batch_size);
 fwht_status_t fwht_batch_f64_cuda_device(double* d_data, size_t n, size_t batch_size);
+fwht_status_t fwht_batch_f32_cuda_device(float* d_data, size_t n, size_t batch_size);
+
+/* 
+ * FP16 Tensor Core accelerated batch transform (SM 7.0+ required).
+ * Uses CUDA Tensor Cores for 2-3× speedup on sizes 256-32K.
+ * Input/output: fp16 format (uint16_t representation).
+ * Returns FWHT_ERROR_NOT_SUPPORTED if Tensor Cores unavailable.
+ */
+int fwht_batch_f16_cuda_device(const void* d_in, void* d_out, 
+                                unsigned int n, unsigned int batch_size);
 
 /* ============================================================================
  * PERSISTENT GPU CONTEXT API

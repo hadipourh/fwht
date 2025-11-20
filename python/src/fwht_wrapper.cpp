@@ -8,7 +8,8 @@
  */
 
 extern "C" {
-    // Include C implementation files from local c_src directory
-    #include "../c_src/fwht_core.c"
-    #include "../c_src/fwht_backend.c"
+    // Include C implementation files from parent src/ directory
+    #include "../../src/fwht_core.c"
+    #include "../../src/fwht_backend.c"
+    #include "../../src/fwht_batch.c"
 }

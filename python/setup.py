@@ -13,8 +13,9 @@ from pybind11.setup_helpers import Pybind11Extension, build_ext
 
 # Paths relative to python/ directory
 PYTHON_DIR = Path(__file__).parent.absolute()
-INCLUDE_DIR = PYTHON_DIR / "include"
-SRC_DIR = PYTHON_DIR / "c_src"
+PROJECT_ROOT = PYTHON_DIR.parent  # Go up to libfwht/
+INCLUDE_DIR = PROJECT_ROOT / "include"
+SRC_DIR = PROJECT_ROOT / "src"
 
 # Validate paths
 if not INCLUDE_DIR.exists():
@@ -37,6 +38,7 @@ for src in wrapper_sources:
 c_sources_check = [
     str(SRC_DIR / "fwht_core.c"),
     str(SRC_DIR / "fwht_backend.c"),
+    str(SRC_DIR / "fwht_batch.c"),
 ]
 for src in c_sources_check:
     if not Path(src).exists():
@@ -87,7 +89,7 @@ print(f"CUDA support: {'YES' if cuda_available else 'NO (set USE_CUDA=1 to enabl
 print("=" * 70)
 
 # Compiler and linker flags - use C++ flags as base
-extra_compile_args = ['-O3', '-std=c++11', '-fPIC']
+extra_compile_args = ['-O3', '-std=c++17', '-fPIC']
 extra_link_args = []
 define_macros = []
 include_dirs_list = [str(INCLUDE_DIR), str(PYTHON_DIR / "include")]  # Add DLPack include path
@@ -166,7 +168,8 @@ if cuda_available:
             f'-I{INCLUDE_DIR}',
             '-DUSE_CUDA=1',
             '-Xcompiler', '-fPIC',
-            '--std=c++11',
+            '--std=c++17',
+            '-arch=sm_80',
             '-O3'
         ]
         # Allow users to append extra NVCC flags via environment (e.g., gencodes or std)

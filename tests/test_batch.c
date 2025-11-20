@@ -23,14 +23,14 @@ static int test_batch_correctness_i32(void) {
     const size_t n = 256;
     const size_t batch_size = 16;
     
-    int32_t** data_batch = malloc(batch_size * sizeof(int32_t*));
-    int32_t** data_seq = malloc(batch_size * sizeof(int32_t*));
+    int32_t** data_batch = (int32_t**)malloc(batch_size * sizeof(int32_t*));
+    int32_t** data_seq = (int32_t**)malloc(batch_size * sizeof(int32_t*));
     
     /* Initialize with random data */
     srand(12345);
     for (size_t i = 0; i < batch_size; i++) {
-        data_batch[i] = malloc(n * sizeof(int32_t));
-        data_seq[i] = malloc(n * sizeof(int32_t));
+        data_batch[i] = (int32_t*)malloc(n * sizeof(int32_t));
+        data_seq[i] = (int32_t*)malloc(n * sizeof(int32_t));
         
         for (size_t j = 0; j < n; j++) {
             int32_t val = (rand() % 3) - 1;  /* -1, 0, or 1 */
@@ -83,11 +83,11 @@ static int test_batch_performance_i32(void) {
     const size_t n = 256;
     const size_t batch_size = 128;
     
-    int32_t** data = malloc(batch_size * sizeof(int32_t*));
+    int32_t** data = (int32_t**)malloc(batch_size * sizeof(int32_t*));
     
     srand(54321);
     for (size_t i = 0; i < batch_size; i++) {
-        data[i] = malloc(n * sizeof(int32_t));
+        data[i] = (int32_t*)malloc(n * sizeof(int32_t));
         for (size_t j = 0; j < n; j++) {
             data[i][j] = (rand() % 3) - 1;
         }
@@ -160,12 +160,12 @@ static int test_batch_various_sizes(void) {
         size_t n = sizes[s];
         size_t batch_size = 8;
         
-        int32_t** data_batch = malloc(batch_size * sizeof(int32_t*));
-        int32_t** data_seq = malloc(batch_size * sizeof(int32_t*));
+        int32_t** data_batch = (int32_t**)malloc(batch_size * sizeof(int32_t*));
+        int32_t** data_seq = (int32_t**)malloc(batch_size * sizeof(int32_t*));
         
         for (size_t i = 0; i < batch_size; i++) {
-            data_batch[i] = malloc(n * sizeof(int32_t));
-            data_seq[i] = malloc(n * sizeof(int32_t));
+            data_batch[i] = (int32_t*)malloc(n * sizeof(int32_t));
+            data_seq[i] = (int32_t*)malloc(n * sizeof(int32_t));
             
             for (size_t j = 0; j < n; j++) {
                 int32_t val = (j % 2 == 0) ? 1 : -1;

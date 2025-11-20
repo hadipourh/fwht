@@ -13,6 +13,7 @@
 
 #ifdef USE_CUDA
 #include <dlpack/dlpack.h>
+#include <cuda_runtime.h>  // For cudaMalloc, cudaMemcpy, cudaFree
 #include <cuda_fp16.h>  // C++ header, must be outside extern "C"
 #endif
 
@@ -508,6 +509,77 @@ void py_fwht_batch_f64_cuda(py::array_t<double> data, size_t n, size_t batch_siz
     check_status(status, "fwht_batch_f64_cuda");
 }
 
+void py_fwht_batch_f32_cuda(py::array_t<float> data, size_t n, size_t batch_size) {
+    auto buf = data.request();
+    
+    if (buf.ndim != 1 && buf.ndim != 2) {
+        throw std::invalid_argument("Input must be 1D or 2D array");
+    }
+    
+    size_t total_elements = buf.shape[0];
+    if (buf.ndim == 2) {
+        total_elements = buf.shape[0] * buf.shape[1];
+    }
+    
+    if (total_elements != n * batch_size) {
+        throw std::invalid_argument("Array size must equal n * batch_size");
+    }
+    
+    float* ptr = static_cast<float*>(buf.ptr);
+    fwht_status_t status = fwht_batch_f32_cuda(ptr, n, batch_size);
+    check_status(status, "fwht_batch_f32_cuda");
+}
+
+// FP16 host memory wrapper - converts to __half, allocates GPU memory, processes, converts back
+void py_fwht_batch_f16_cuda(py::array_t<uint16_t> data, size_t n, size_t batch_size) {
+    auto buf = data.request();
+    
+    if (buf.ndim != 1 && buf.ndim != 2) {
+        throw std::invalid_argument("Input must be 1D or 2D array");
+    }
+    
+    size_t total_elements = buf.shape[0];
+    if (buf.ndim == 2) {
+        total_elements = buf.shape[0] * buf.shape[1];
+    }
+    
+    if (total_elements != n * batch_size) {
+        throw std::invalid_argument("Array size must equal n * batch_size");
+    }
+    
+    // NumPy float16 is stored as uint16 in memory (IEEE 754 binary16)
+    uint16_t* ptr = static_cast<uint16_t*>(buf.ptr);
+    
+    // Allocate device memory
+    __half* d_data = nullptr;
+    cudaError_t err = cudaMalloc(&d_data, total_elements * sizeof(__half));
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("cudaMalloc failed: ") + cudaGetErrorString(err));
+    }
+    
+    // Copy host→device (uint16 and __half have same memory layout)
+    err = cudaMemcpy(d_data, ptr, total_elements * sizeof(__half), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        cudaFree(d_data);
+        throw std::runtime_error(std::string("cudaMemcpy H2D failed: ") + cudaGetErrorString(err));
+    }
+    
+    // Process on device using Tensor Cores
+    fwht_status_t status = fwht_batch_f16_cuda(d_data, n, batch_size);
+    
+    if (status == FWHT_SUCCESS) {
+        // Copy device→host
+        err = cudaMemcpy(ptr, d_data, total_elements * sizeof(__half), cudaMemcpyDeviceToHost);
+        if (err != cudaSuccess) {
+            cudaFree(d_data);
+            throw std::runtime_error(std::string("cudaMemcpy D2H failed: ") + cudaGetErrorString(err));
+        }
+    }
+    
+    cudaFree(d_data);
+    check_status(status, "fwht_batch_f16_cuda");
+}
+
 // GPU Context
 class PyGPUContext {
 private:
@@ -556,9 +628,37 @@ public:
 };
 
 // GPU DLPack Support - Zero-copy interop with PyTorch, CuPy, JAX, etc.
+namespace {
+inline void consume_dlpack_capsule(py::capsule capsule) {
+    PyObject* raw = capsule.ptr();
+    if (raw == nullptr) {
+        return;
+    }
+
+    const char* name = PyCapsule_GetName(raw);
+    if (name == nullptr) {
+        return;  // Already consumed or invalid
+    }
+    
+    // Check if already consumed
+    if (std::strcmp(name, "used_dltensor") == 0) {
+        return;
+    }
+    
+    DLManagedTensor* tensor = static_cast<DLManagedTensor*>(
+        PyCapsule_GetPointer(raw, name));
+    if (tensor != nullptr && tensor->deleter != nullptr) {
+        tensor->deleter(tensor);
+    }
+    
+    // Mark as consumed by changing name only (don't set pointer to null)
+    PyCapsule_SetName(raw, "used_dltensor");
+}
+} // namespace
+
 void py_fwht_batch_f64_dlpack(py::capsule dlpack_tensor, size_t n, size_t batch_size) {
     // Import DLManagedTensor from capsule
-    auto dlm_tensor = static_cast<DLManagedTensor*>(dlpack_tensor);
+    auto dlm_tensor = dlpack_tensor.get_pointer<DLManagedTensor>();
     
     // Validate tensor properties
     if (dlm_tensor->dl_tensor.ndim != 2) {
@@ -581,12 +681,15 @@ void py_fwht_batch_f64_dlpack(py::capsule dlpack_tensor, size_t n, size_t batch_
     double* d_ptr = static_cast<double*>(dlm_tensor->dl_tensor.data);
     
     // Call CUDA kernel directly - NO H2D/D2H transfers!
-    fwht_status_t status = fwht_batch_f64_cuda(d_ptr, n, batch_size);
-    check_status(status, "fwht_batch_f64_cuda");
+    fwht_status_t status = fwht_batch_f64_cuda_device(d_ptr, n, batch_size);
+    
+    // Consume capsule first to avoid SystemError if check_status throws
+    consume_dlpack_capsule(dlpack_tensor);
+    check_status(status, "fwht_batch_f64_cuda_device");
 }
 
 void py_fwht_batch_i32_dlpack(py::capsule dlpack_tensor, size_t n, size_t batch_size) {
-    auto dlm_tensor = static_cast<DLManagedTensor*>(dlpack_tensor);
+    auto dlm_tensor = dlpack_tensor.get_pointer<DLManagedTensor>();
     
     if (dlm_tensor->dl_tensor.ndim != 2) {
         throw std::invalid_argument("DLPack tensor must be 2-dimensional (batch_size, n)");
@@ -605,13 +708,16 @@ void py_fwht_batch_i32_dlpack(py::capsule dlpack_tensor, size_t n, size_t batch_
     
     int32_t* d_ptr = static_cast<int32_t*>(dlm_tensor->dl_tensor.data);
     
-    fwht_status_t status = fwht_batch_i32_cuda(d_ptr, n, batch_size);
-    check_status(status, "fwht_batch_i32_cuda");
+    fwht_status_t status = fwht_batch_i32_cuda_device(d_ptr, n, batch_size);
+    
+    // Consume capsule first to avoid SystemError if check_status throws
+    consume_dlpack_capsule(dlpack_tensor);
+    check_status(status, "fwht_batch_i32_cuda_device");
 }
 
 // FP32 DLPack support (Meta-inspired high-speed kernel)
 void py_fwht_batch_f32_dlpack(py::capsule dlpack_tensor, size_t n, size_t batch_size) {
-    auto dlm_tensor = static_cast<DLManagedTensor*>(dlpack_tensor);
+    auto dlm_tensor = dlpack_tensor.get_pointer<DLManagedTensor>();
     
     if (dlm_tensor->dl_tensor.ndim != 2) {
         throw std::invalid_argument("DLPack tensor must be 2-dimensional (batch_size, n)");
@@ -630,15 +736,18 @@ void py_fwht_batch_f32_dlpack(py::capsule dlpack_tensor, size_t n, size_t batch_
     
     float* d_ptr = static_cast<float*>(dlm_tensor->dl_tensor.data);
     
-    // Call Meta-inspired fp32 kernel
-    fwht_status_t status = fwht_batch_f32_cuda(d_ptr, n, batch_size);
-    check_status(status, "fwht_batch_f32_cuda");
+    // Call Meta-inspired fp32 kernel using device pointer
+    fwht_status_t status = fwht_batch_f32_cuda_device(d_ptr, n, batch_size);
+    
+    // Consume capsule first to avoid SystemError if check_status throws
+    consume_dlpack_capsule(dlpack_tensor);
+    check_status(status, "fwht_batch_f32_cuda_device");
 }
 
 // FP16 DLPack support (Meta-inspired maximum speed)
 // Note: Uses CUDA __half type from cuda_fp16.h
 void py_fwht_batch_f16_dlpack(py::capsule dlpack_tensor, size_t n, size_t batch_size) {
-    auto dlm_tensor = static_cast<DLManagedTensor*>(dlpack_tensor);
+    auto dlm_tensor = dlpack_tensor.get_pointer<DLManagedTensor>();
     
     if (dlm_tensor->dl_tensor.ndim != 2) {
         throw std::invalid_argument("DLPack tensor must be 2-dimensional (batch_size, n)");
@@ -660,6 +769,9 @@ void py_fwht_batch_f16_dlpack(py::capsule dlpack_tensor, size_t n, size_t batch_
     
     // Call Meta-inspired fp16 kernel (cast void* to __half* inside CUDA code)
     fwht_status_t status = fwht_batch_f16_cuda(static_cast<__half*>(d_ptr), n, batch_size);
+    
+    // Consume capsule first to avoid SystemError if check_status throws
+    consume_dlpack_capsule(dlpack_tensor);
     check_status(status, "fwht_batch_f16_cuda");
 }
 
@@ -818,6 +930,12 @@ PYBIND11_MODULE(_pyfwht, m) {
     gpu.def("batch_f64", &py_fwht_batch_f64_cuda,
             py::arg("data"), py::arg("n"), py::arg("batch_size"),
             "Batch WHT for float64 on GPU (data must be flat array of n * batch_size)");
+    gpu.def("batch_f32", &py_fwht_batch_f32_cuda,
+            py::arg("data"), py::arg("n"), py::arg("batch_size"),
+            "Batch WHT for float32 on GPU (uses Tensor Cores on sm_70+, ~2× faster than fp64)");
+    gpu.def("batch_f16", &py_fwht_batch_f16_cuda,
+            py::arg("data"), py::arg("n"), py::arg("batch_size"),
+            "Batch WHT for float16 on GPU (uses Tensor Cores on sm_70+, maximum speed ~40-55 GOps/s @ n=4096)");
     
     // DLPack-based zero-copy batch processing
     gpu.def("batch_f64_dlpack", &py_fwht_batch_f64_dlpack,

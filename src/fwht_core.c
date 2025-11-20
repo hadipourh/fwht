@@ -580,11 +580,23 @@ static void fwht_butterfly_i32_recursive(int32_t* data, size_t n, int depth, int
  * Adaptive task depth: calculates optimal depth based on number of threads.
  * Formula: max_depth = log2(num_threads) + 2
  * This creates roughly 2-4x more tasks than threads for good load balancing.
+ * 
+ * NOTE: If already in a parallel region (nested parallelism), falls back to
+ * sequential version to avoid deadlocks.
  */
 static void fwht_butterfly_i32_openmp(int32_t* data, size_t n) {
     if (n < 2) {
         return;
     }
+    
+    /* Check if we're already in a parallel region (nested parallelism) */
+    #ifdef _OPENMP
+    if (omp_in_parallel()) {
+        /* Already in parallel region - use sequential version to avoid deadlock */
+        fwht_butterfly_i32(data, n);
+        return;
+    }
+    #endif
     
     #pragma omp parallel
     {
@@ -656,11 +668,23 @@ static void fwht_butterfly_f64_recursive(double* data, size_t n, int depth, int 
 /*
  * OpenMP entry point for double precision using recursive task-based parallelism.
  * Adaptive task depth for optimal scaling on systems with many cores.
+ * 
+ * NOTE: If already in a parallel region (nested parallelism), falls back to
+ * sequential version to avoid deadlocks.
  */
 static void fwht_butterfly_f64_openmp(double* data, size_t n) {
     if (n < 2) {
         return;
     }
+    
+    /* Check if we're already in a parallel region (nested parallelism) */
+    #ifdef _OPENMP
+    if (omp_in_parallel()) {
+        /* Already in parallel region - use sequential version to avoid deadlock */
+        fwht_butterfly_f64(data, n);
+        return;
+    }
+    #endif
     
     #pragma omp parallel
     {
@@ -1319,68 +1343,41 @@ fwht_status_t fwht_batch_i32(fwht_context_t* ctx, int32_t** data_array,
         backend = fwht_recommend_backend(n);
     }
     
-#ifdef FWHT_ENABLE_CUDA
-    /* GPU batch: copy all arrays to device and process in parallel */
+#ifdef USE_CUDA
+    /* GPU batch: use optimized CUDA function that handles packing/unpacking */
     if (backend == FWHT_BACKEND_GPU) {
-        /* Allocate contiguous device memory for all arrays */
-        int32_t* d_data = NULL;
-        size_t total_size = n * batch_size;
-        cudaError_t err = cudaMalloc(&d_data, total_size * sizeof(int32_t));
-        if (err != cudaSuccess) {
-            return FWHT_ERROR_CUDA;
-        }
-        
-        /* Copy all arrays to device */
-        for (int i = 0; i < batch_size; ++i) {
-            err = cudaMemcpy(d_data + i * n, data_array[i], 
-                           n * sizeof(int32_t), cudaMemcpyHostToDevice);
-            if (err != cudaSuccess) {
-                cudaFree(d_data);
-                return FWHT_ERROR_CUDA;
-            }
-        }
-        
-        /* Process batch on GPU */
-        fwht_status_t status = fwht_batch_i32_cuda(d_data, n, batch_size);
-        
-        /* Copy results back */
-        if (status == FWHT_SUCCESS) {
-            for (int i = 0; i < batch_size; ++i) {
-                err = cudaMemcpy(data_array[i], d_data + i * n,
-                               n * sizeof(int32_t), cudaMemcpyDeviceToHost);
-                if (err != cudaSuccess) {
-                    status = FWHT_ERROR_CUDA;
-                    break;
-                }
-            }
-        }
-        
-        cudaFree(d_data);
-        return status;
+        /* Forward declaration for CUDA function */
+        extern fwht_status_t fwht_batch_i32_cuda_from_pointers(int32_t** data_array, 
+                                                                size_t n, size_t batch_size);
+        return fwht_batch_i32_cuda_from_pointers(data_array, n, batch_size);
     }
 #endif
     
     /* CPU batch: parallelize with OpenMP if available */
-#ifdef FWHT_ENABLE_OPENMP
+#ifdef _OPENMP
     if (backend == FWHT_BACKEND_OPENMP || batch_size > 4) {
-        int success = 1;
         fwht_status_t first_error = FWHT_SUCCESS;
         
-        #pragma omp parallel for if(batch_size > 1)
+        /* Disable nested parallelism to prevent deadlocks */
+        int old_nested = omp_get_nested();
+        omp_set_nested(0);
+        
+        /* Use CPU backend inside parallel region to avoid nested OpenMP calls */
+        #pragma omp parallel for schedule(static)
         for (int i = 0; i < batch_size; ++i) {
-            if (success) {  /* Skip if another thread failed */
-                fwht_status_t status = fwht_i32_backend(data_array[i], n, backend);
-                if (status != FWHT_SUCCESS) {
-                    #pragma omp critical
-                    {
-                        if (success) {
-                            success = 0;
-                            first_error = status;
-                        }
+            fwht_status_t status = fwht_i32_backend(data_array[i], n, FWHT_BACKEND_CPU);
+            if (status != FWHT_SUCCESS) {
+                #pragma omp critical
+                {
+                    if (first_error == FWHT_SUCCESS) {
+                        first_error = status;
                     }
                 }
             }
         }
+        
+        /* Restore nested parallelism setting */
+        omp_set_nested(old_nested);
         
         return first_error;
     }
@@ -1407,68 +1404,41 @@ fwht_status_t fwht_batch_f64(fwht_context_t* ctx, double** data_array,
         backend = fwht_recommend_backend(n);
     }
     
-#ifdef FWHT_ENABLE_CUDA
-    /* GPU batch: copy all arrays to device and process in parallel */
+#ifdef USE_CUDA
+    /* GPU batch: use optimized CUDA function that handles packing/unpacking */
     if (backend == FWHT_BACKEND_GPU) {
-        /* Allocate contiguous device memory for all arrays */
-        double* d_data = NULL;
-        size_t total_size = n * batch_size;
-        cudaError_t err = cudaMalloc(&d_data, total_size * sizeof(double));
-        if (err != cudaSuccess) {
-            return FWHT_ERROR_CUDA;
-        }
-        
-        /* Copy all arrays to device */
-        for (int i = 0; i < batch_size; ++i) {
-            err = cudaMemcpy(d_data + i * n, data_array[i], 
-                           n * sizeof(double), cudaMemcpyHostToDevice);
-            if (err != cudaSuccess) {
-                cudaFree(d_data);
-                return FWHT_ERROR_CUDA;
-            }
-        }
-        
-        /* Process batch on GPU */
-        fwht_status_t status = fwht_batch_f64_cuda(d_data, n, batch_size);
-        
-        /* Copy results back */
-        if (status == FWHT_SUCCESS) {
-            for (int i = 0; i < batch_size; ++i) {
-                err = cudaMemcpy(data_array[i], d_data + i * n,
-                               n * sizeof(double), cudaMemcpyDeviceToHost);
-                if (err != cudaSuccess) {
-                    status = FWHT_ERROR_CUDA;
-                    break;
-                }
-            }
-        }
-        
-        cudaFree(d_data);
-        return status;
+        /* Forward declaration for CUDA function */
+        extern fwht_status_t fwht_batch_f64_cuda_from_pointers(double** data_array,
+                                                                size_t n, size_t batch_size);
+        return fwht_batch_f64_cuda_from_pointers(data_array, n, batch_size);
     }
 #endif
     
     /* CPU batch: parallelize with OpenMP if available */
-#ifdef FWHT_ENABLE_OPENMP
+#ifdef _OPENMP
     if (backend == FWHT_BACKEND_OPENMP || batch_size > 4) {
-        int success = 1;
         fwht_status_t first_error = FWHT_SUCCESS;
         
-        #pragma omp parallel for if(batch_size > 1)
+        /* Disable nested parallelism to prevent deadlocks */
+        int old_nested = omp_get_nested();
+        omp_set_nested(0);
+        
+        /* Use CPU backend inside parallel region to avoid nested OpenMP calls */
+        #pragma omp parallel for schedule(static)
         for (int i = 0; i < batch_size; ++i) {
-            if (success) {  /* Skip if another thread failed */
-                fwht_status_t status = fwht_f64_backend(data_array[i], n, backend);
-                if (status != FWHT_SUCCESS) {
-                    #pragma omp critical
-                    {
-                        if (success) {
-                            success = 0;
-                            first_error = status;
-                        }
+            fwht_status_t status = fwht_f64_backend(data_array[i], n, FWHT_BACKEND_CPU);
+            if (status != FWHT_SUCCESS) {
+                #pragma omp critical
+                {
+                    if (first_error == FWHT_SUCCESS) {
+                        first_error = status;
                     }
                 }
             }
         }
+        
+        /* Restore nested parallelism setting */
+        omp_set_nested(old_nested);
         
         return first_error;
     }
