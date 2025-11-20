@@ -2,8 +2,10 @@ include README.md
 include LICENSE
 recursive-include pyfwht *.py *.pyi
 recursive-include src *.cpp *.h
-recursive-include include *.h
-recursive-include c_src *.c *.cu *.h
+
+# Include parent library sources (will be in sdist)
+graft ../include
+graft ../src
 
 # Exclude build artifacts and cache
 global-exclude *.pyc
@@ -12,7 +14,9 @@ global-exclude __pycache__
 global-exclude *.so
 global-exclude *.dylib
 global-exclude *.dll
+global-exclude *.o
 global-exclude .DS_Store
-
-# Exclude benchmark scripts (development only)
-exclude gpu_benchmark.py
+prune build
+prune dist
+prune *.egg-info
+prune c_src

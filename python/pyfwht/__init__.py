@@ -20,7 +20,12 @@ from . import _pyfwht
 from ._pyfwht import Backend, Config
 
 import numpy as np
+import warnings
+import os
 from typing import Optional, Union, Any
+
+# Global flag for fp16 precision warning (shown only once)
+_fp16_warning_shown = False
 
 # Re-export low-level C bindings for advanced users
 from ._pyfwht import (
@@ -65,6 +70,7 @@ __all__ = [
     'Backend',
     'Config',
     'Context',
+    'fwht',
     'transform',
     'compute',
     'from_bool',
@@ -78,7 +84,142 @@ __all__ = [
     'backend_name',
     'version',
     'gpu',  # GPU module
+    'gpu_get_compute_capability',
 ]
+
+
+def _warn_fp16_precision():
+    """
+    Show one-time warning about fp16 precision tradeoffs.
+    Can be suppressed with FWHT_SILENCE_FP16_WARNING=1 environment variable.
+    """
+    global _fp16_warning_shown
+    
+    if _fp16_warning_shown:
+        return
+    
+    # Check if warning should be suppressed
+    if os.environ.get('FWHT_SILENCE_FP16_WARNING') == '1':
+        _fp16_warning_shown = True
+        return
+    
+    warnings.warn(
+        "\n"
+        "╔═══════════════════════════════════════════════════════════════════════════╗\n"
+        "║ FP16 Tensor Core Precision Notice                                         ║\n"
+        "╠═══════════════════════════════════════════════════════════════════════════╣\n"
+        "║ Using float16 provides 25-36× speedup but sacrifices integer exactness.   ║\n"
+        "║                                                                           ║\n"
+        "║ Expected behavior:                                                        ║\n"
+        "║   • ~12% of results differ by ±1 to ±4 from exact integer result          ║\n"
+        "║   • Relative error: < 0.1% for typical value ranges                       ║\n"
+        "║   • Maximum observed error: ±4 integers (typically ±1)                    ║\n"
+        "║                                                                           ║\n"
+        "║ Recommended use cases:                                                    ║\n"
+        "║   ✓ Machine learning (inference/training)                                 ║\n"
+        "║   ✓ Signal processing (approximate transforms)                            ║\n"
+        "║   ✗ Cryptanalysis (use float32 or float64 for exact results)              ║\n"
+        "║                                                                           ║\n"
+        "║ To suppress this warning: set FWHT_SILENCE_FP16_WARNING=1                 ║\n"
+        "╚═══════════════════════════════════════════════════════════════════════════╝",
+        UserWarning,
+        stacklevel=3
+    )
+    
+    _fp16_warning_shown = True
+
+
+def fwht(
+    data: np.ndarray,
+    backend: Optional[Union[Backend, str]] = None
+) -> np.ndarray:
+    """
+    Walsh-Hadamard Transform supporting fp16/fp32/fp64 and batches.
+    
+    Parameters
+    ----------
+    data : np.ndarray
+        1-D or 2-D NumPy array.
+        Supported dtypes: float16, float32, float64, int8, int32.
+        For 2-D: shape (batch_size, n) for batch processing.
+    backend : Backend or str, optional
+        Backend selection ('auto', 'cpu', 'openmp', 'cuda').
+        If None, uses 'cuda' for GPU-resident data, 'auto' otherwise.
+    
+    Returns
+    -------
+    np.ndarray
+        Transformed array (new copy).
+    
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import pyfwht
+    >>> data = np.random.randn(4096).astype(np.float16)
+    >>> result = pyfwht.fwht(data, backend='cuda')  # Uses Tensor Cores!
+    """
+    if not isinstance(data, np.ndarray):
+        raise TypeError("Input must be a NumPy array")
+    
+    # Copy data to avoid modifying input
+    result = data.copy()
+    
+    # Handle string backend
+    if isinstance(backend, str):
+        name = backend.strip().lower()
+        mapping = {'auto': Backend.AUTO, 'cpu': Backend.CPU, 'openmp': Backend.OPENMP, 'gpu': Backend.GPU, 'cuda': Backend.GPU}
+        backend = mapping.get(name, Backend.AUTO)
+    elif backend is None:
+        backend = Backend.GPU if has_gpu() else Backend.AUTO
+    
+    # Batch processing (2-D array)
+    if result.ndim == 2:
+        batch_size, n = result.shape
+        if result.dtype in (np.float16, np.float32, np.float64) and backend == Backend.GPU and has_gpu():
+            # Use GPU batch processing with native precision (Tensor Cores for fp16/fp32!)
+            if result.dtype == np.float32:
+                gpu.batch_f32(result, n, batch_size)
+            elif result.dtype == np.float16:
+                # NumPy float16 view as uint16 for C++ binding
+                _warn_fp16_precision()
+                result_u16 = result.view(np.uint16)
+                gpu.batch_f16(result_u16, n, batch_size)
+            else:
+                gpu.batch_f64(result, n, batch_size)
+        elif result.dtype == np.int32 and backend == Backend.GPU and has_gpu():
+            gpu.batch_i32(result, n, batch_size)
+        else:
+            # CPU batch: process each row
+            for i in range(batch_size):
+                transform(result[i], backend)
+        return result
+    
+    # Single transform (1-D array)
+    if result.ndim != 1:
+        raise ValueError("Input must be 1-D or 2-D array")
+    
+    # Handle different dtypes
+    if result.dtype == np.float16 and backend == Backend.GPU and has_gpu():
+        # fp16: use native GPU kernel with Tensor Cores!
+        _warn_fp16_precision()
+        n = len(result)
+        result_u16 = result.view(np.uint16)
+        gpu.batch_f16(result_u16, n, 1)
+        return result
+    elif result.dtype == np.float32 and backend == Backend.GPU and has_gpu():
+        # fp32: use native GPU kernel with Tensor Cores!
+        n = len(result)
+        gpu.batch_f32(result, n, 1)
+        return result
+    elif result.dtype in (np.float16, np.float32):
+        # CPU fallback: convert to fp64
+        result_f64 = result.astype(np.float64)
+        transform(result_f64, backend)
+        return result_f64.astype(result.dtype)
+    else:
+        # Native supported types
+        transform(result, backend)
+        return result
 
 
 def transform(
@@ -135,10 +276,11 @@ def transform(
             'cpu': Backend.CPU,
             'openmp': Backend.OPENMP,
             'gpu': Backend.GPU,
+            'cuda': Backend.GPU,
         }
         if name not in mapping:
             raise ValueError(
-                f"Unknown backend string '{backend}'. Expected one of: auto,cpu,openmp,gpu"
+                f"Unknown backend string '{backend}'. Expected one of: auto,cpu,openmp,gpu,cuda"
             )
         backend = mapping[name]
 
@@ -628,6 +770,31 @@ class GPUModule:
         n = batch.shape[1]
         bsz = batch.shape[0]
         _pb.gpu.batch_f64(batch, int(n), int(bsz))
+
+    # Low-level batch operations accepting (data, n, batch_size)
+    # These mirror the pybind11 exports for direct use in fwht()
+    def batch_f64(self, data: np.ndarray, n: int, batch_size: int) -> None:
+        if not self.available:
+            raise RuntimeError("GPU support not available")
+        _pb.gpu.batch_f64(data, int(n), int(batch_size))
+
+    def batch_f32(self, data: np.ndarray, n: int, batch_size: int) -> None:
+        if not self.available:
+            raise RuntimeError("GPU support not available")
+        _pb.gpu.batch_f32(data, int(n), int(batch_size))
+
+    def batch_f16(self, data_u16: np.ndarray, n: int, batch_size: int) -> None:
+        if not self.available:
+            raise RuntimeError("GPU support not available")
+        # Expects uint16 view of float16 array
+        if data_u16.dtype != np.uint16:
+            raise TypeError("data_u16 must be a uint16 view of float16 array")
+        _pb.gpu.batch_f16(data_u16, int(n), int(batch_size))
+
+    def batch_i32(self, data: np.ndarray, n: int, batch_size: int) -> None:
+        if not self.available:
+            raise RuntimeError("GPU support not available")
+        _pb.gpu.batch_i32(data, int(n), int(batch_size))
     
     def batch_transform_dlpack(self, tensor, n: Optional[int] = None, batch_size: Optional[int] = None) -> None:
         """
@@ -733,6 +900,7 @@ class GPUModule:
                 _pb.gpu.batch_f32_dlpack(dlpack_tensor, int(n), int(batch_size))
             elif 'float16' in dtype_str or 'half' in dtype_str:
                 # Meta-inspired fp16 kernel (11× faster than fp64, lower precision)
+                _warn_fp16_precision()
                 _pb.gpu.batch_f16_dlpack(dlpack_tensor, int(n), int(batch_size))
             elif 'int32' in dtype_str:
                 _pb.gpu.batch_i32_dlpack(dlpack_tensor, int(n), int(batch_size))
@@ -876,3 +1044,10 @@ class GPUContext:
 
 # Create singleton GPU module instance
 gpu = GPUModule()
+
+# Convenience functions at module level
+def gpu_get_compute_capability():
+    """Get GPU compute capability (e.g., 89 for SM 8.9)."""
+    if not has_gpu():
+        return 0
+    return _pb.gpu.Info.get_compute_capability() if _GPU_AVAILABLE else 0

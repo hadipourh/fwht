@@ -36,7 +36,7 @@ else
 	CFLAGS += -march=native
 	CXXFLAGS += -march=native
 endif
-NVCCFLAGS = -O3 -I$(INCLUDE_DIR) --compiler-options -fPIC -std=c++14
+NVCCFLAGS = -O3 -I$(INCLUDE_DIR) --compiler-options -fPIC -std=c++17 -arch=sm_80
 LDFLAGS =
 
 # Directories
@@ -124,12 +124,16 @@ ifeq ($(HAS_CUDA),1)
         CFLAGS += -DUSE_CUDA
         CXXFLAGS += -DUSE_CUDA
 		NVCCFLAGS += -DUSE_CUDA
-        CUDA_LDFLAGS = -L/usr/local/cuda/lib64 -lcudart
+		CUDA_LDFLAGS = -L/usr/local/cuda/lib64 -lcudart
+		CUDA_INCFLAGS = -I/usr/local/cuda/include
         # Try to detect CUDA path
         CUDA_PATH := $(shell dirname $(shell dirname $(shell which nvcc)))
         ifneq ($(CUDA_PATH),)
-            CUDA_LDFLAGS = -L$(CUDA_PATH)/lib64 -lcudart
+			CUDA_LDFLAGS = -L$(CUDA_PATH)/lib64 -lcudart
+			CUDA_INCFLAGS = -I$(CUDA_PATH)/include
         endif
+		CFLAGS += $(CUDA_INCFLAGS)
+		CXXFLAGS += $(CUDA_INCFLAGS)
     endif
 endif
 

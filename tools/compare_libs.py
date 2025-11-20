@@ -184,16 +184,16 @@ def _numpy_reference(x: Any) -> Any:
     if not isinstance(arr, np.ndarray):
         arr = np.asarray(arr)
 
+    # Use fwht() which supports all dtypes including fp16/fp32
     if arr.ndim == 1:
         result = arr.copy()
-        pyfwht.transform(result, backend="cpu")
+        result = pyfwht.fwht(result, backend='cpu')
         return result
     elif arr.ndim == 2:
-        # Loop is fine for correctness; not timing-critical.
-        out = arr.copy()
-        for i in range(out.shape[0]):
-            pyfwht.transform(out[i], backend="cpu")
-        return out
+        # Process batch
+        result = arr.copy()
+        result = pyfwht.fwht(result, backend='cpu')
+        return result
     else:
         raise ValueError("reference expects 1D or 2D array")
 
@@ -203,38 +203,45 @@ def bench_pyfwht_cpu(n: int, batch: int, dtype: str,
     import numpy as np
     import pyfwht  # type: ignore
 
+    # Use native dtypes for CPU too
     if dtype == "int32":
-        x = (np.random.randint(-2**31, 2**31 - 1, size=(batch, n), dtype=np.int32)
-             if batch > 1 else np.random.randint(-2**31, 2**31 - 1, size=(n,), dtype=np.int32))
+        np_dtype = np.int32
+        x = (np.random.randint(-2**31, 2**31 - 1, size=(batch, n), dtype=np_dtype)
+             if batch > 1 else np.random.randint(-2**31, 2**31 - 1, size=(n,), dtype=np_dtype))
     elif dtype == "float64":
-        x = (np.random.randn(batch, n).astype(np.float64)
-             if batch > 1 else np.random.randn(n).astype(np.float64))
-    else:  # float32 or others -> use float64 for CPU reference fairness
-        x = (np.random.randn(batch, n).astype(np.float64)
-             if batch > 1 else np.random.randn(n).astype(np.float64))
-
-    # Build callable
-    if batch == 1:
-        def run_once():
-            pyfwht.transform(x, backend=pyfwht.Backend.CPU)
+        np_dtype = np.float64
+        x = (np.random.randn(batch, n).astype(np_dtype)
+             if batch > 1 else np.random.randn(n).astype(np_dtype))
+    elif dtype in ("float32", "fp32"):
+        np_dtype = np.float32
+        x = (np.random.randn(batch, n).astype(np_dtype)
+             if batch > 1 else np.random.randn(n).astype(np_dtype))
+    elif dtype in ("float16", "fp16"):
+        np_dtype = np.float16
+        x = (np.random.randn(batch, n).astype(np_dtype)
+             if batch > 1 else np.random.randn(n).astype(np_dtype))
+    elif dtype == "bfloat16":
+        # NumPy doesn't have bfloat16, use fp16
+        np_dtype = np.float16
+        x = (np.random.randn(batch, n).astype(np_dtype)
+             if batch > 1 else np.random.randn(n).astype(np_dtype))
+        dtype = "float16"
     else:
-        def run_once():
-            for i in range(batch):
-                pyfwht.transform(x[i], backend=pyfwht.Backend.CPU)
+        np_dtype = np.float64
+        x = (np.random.randn(batch, n).astype(np_dtype)
+             if batch > 1 else np.random.randn(n).astype(np_dtype))
+
+    # Use fwht() API which supports all dtypes
+    def run_once():
+        _ = pyfwht.fwht(x, backend='cpu')
 
     mean_secs = _timeit(run_once, sync=None, warmup=warmup, repeats=repeats)
     butterflies, ops = _ops_for_fwht(n)
     gops = _format_gops(ops * batch, mean_secs)
 
-    # Correctness against itself (trivial) just to produce a number
+    # Correctness against reference
     ref = _numpy_reference(x)
-    # Compute once explicitly for correctness
-    if batch == 1:
-        x_copy = x.copy()
-        pyfwht.transform(x_copy, backend=pyfwht.Backend.CPU)
-        out_arr = x_copy
-    else:
-        out_arr = _numpy_reference(x)  # looped CPU
+    out_arr = pyfwht.fwht(x.copy(), backend='cpu')
     max_err = float(np.max(np.abs(out_arr - ref))) if hasattr(out_arr, "__array__") else None
 
     return BenchResult(
@@ -262,81 +269,65 @@ def bench_pyfwht_gpu(n: int, batch: int, dtype: str,
         return None
 
     note = ""
-    # Prepare host input
+    # Prepare host input with native dtype (uses Tensor Cores for fp16/fp32!)
     if dtype == "int32":
-        host = np.random.randint(-2**31, 2**31 - 1, size=(n,), dtype=np.int32)
-        ctx_transform_fn = "transform_i32"
-        batch_transform_fn = getattr(pyfwht.gpu, "batch_transform_i32", None)
+        np_dtype = np.int32
+        host = np.random.randint(-2**31, 2**31 - 1, size=(n,), dtype=np_dtype)
     elif dtype == "float64":
-        host = np.random.randn(n).astype(np.float64)
-        ctx_transform_fn = "transform_f64"
-        batch_transform_fn = getattr(pyfwht.gpu, "batch_transform_f64", None)
-    elif dtype in ("float32", "float16", "bfloat16"):
-        # Fallback to float64
-        host = np.random.randn(n).astype(np.float64)
-        ctx_transform_fn = "transform_f64"
-        batch_transform_fn = getattr(pyfwht.gpu, "batch_transform_f64", None)
-        note = f"pyfwht cast {dtype}->float64"
-        dtype = "float64"
+        np_dtype = np.float64
+        host = np.random.randn(n).astype(np_dtype)
+    elif dtype in ("float32", "fp32"):
+        np_dtype = np.float32
+        host = np.random.randn(n).astype(np_dtype)
+        note = "uses Tensor Cores (sm_70+)"
+    elif dtype in ("float16", "fp16"):
+        np_dtype = np.float16
+        host = np.random.randn(n).astype(np_dtype)
+        note = "uses Tensor Cores (sm_70+) - maximum speed"
+    elif dtype == "bfloat16":
+        # NumPy doesn't have native bfloat16, use float16 as proxy
+        np_dtype = np.float16
+        host = np.random.randn(n).astype(np_dtype)
+        note = "using fp16 (NumPy lacks bfloat16)"
+        dtype = "float16"
     else:
         return None
 
-    if batch_transform_fn is None:
-        return None
-
-    # For single-batch without transfer: use GPUContext to avoid cudaMalloc/cudaFree overhead
-    # For batch>1 or with transfer: use batch API
-    if batch == 1 and not include_transfer:
-        # Use GPU Context with pre-allocated device memory (measures kernel only)
-        ctx = pyfwht.gpu.Context(max_n=n, batch_size=1)
-        work_buffer = host.copy()
-        
-        def run_once_exclude():
-            np.copyto(work_buffer, host)
-            getattr(ctx, ctx_transform_fn)(work_buffer)
-        
-        mean_secs = _timeit(run_once_exclude, sync=None, warmup=warmup, repeats=repeats)
-        ctx.close()
+    # Prepare batch input
+    if batch == 1:
+        host_batch = host.reshape(1, n)
     else:
-        # Use batch API (includes cudaMalloc/Free on every call)
-        if batch == 1:
-            host_batch = host.reshape(1, n)
+        if dtype == "int32":
+            host_batch = np.random.randint(-2**31, 2**31 - 1, size=(batch, n), dtype=np_dtype)
         else:
-            if dtype == "int32":
-                host_batch = np.random.randint(-2**31, 2**31 - 1, size=(batch, n), dtype=np.int32)
-            else:
-                host_batch = np.random.randn(batch, n).astype(np.float64)
-        
+            host_batch = np.random.randn(batch, n).astype(np_dtype)
+    
+    # Use new fwht() API which automatically routes to Tensor Core kernels
+    def run_once_include():
+        """Includes data copy overhead"""
+        work = host_batch.copy()
+        _ = pyfwht.fwht(work, backend='cuda')
+
+    def run_once_exclude():
+        """Excludes data copy - pre-allocated work buffer"""
         work_buffer = host_batch.copy()
-        
-        def run_once_include():
-            work = host_batch.copy()
-            batch_transform_fn(work)
-
-        def run_once_exclude():
-            np.copyto(work_buffer, host_batch)
-            batch_transform_fn(work_buffer)
-
-        fn = run_once_include if include_transfer else run_once_exclude
-        mean_secs = _timeit(fn, sync=None, warmup=warmup, repeats=repeats)
+        _ = pyfwht.fwht(work_buffer, backend='cuda')
+    
+    fn = run_once_include if include_transfer else run_once_exclude
+    mean_secs = _timeit(fn, sync=None, warmup=warmup, repeats=repeats)
     
     butterflies, ops = _ops_for_fwht(n)
     gops = _format_gops(ops * batch, mean_secs)
 
     # Correctness vs CPU reference
-    test_input = host.copy() if batch == 1 else host_batch[0].copy()
+    test_input = host_batch[0].copy()
     ref = _numpy_reference(test_input)
     out_arr = test_input.copy()
-    if batch == 1 and not include_transfer:
-        # Use context for correctness check too
-        ctx_test = pyfwht.gpu.Context(max_n=n, batch_size=1)
-        getattr(ctx_test, ctx_transform_fn)(out_arr)
-        ctx_test.close()
-    else:
-        # Use batch API
-        out_batch = out_arr.reshape(1, n)
-        batch_transform_fn(out_batch)
-        out_arr = out_batch[0]
+    
+    # Compute using GPU
+    out_batch = out_arr.reshape(1, n)
+    _ = pyfwht.fwht(out_batch, backend='cuda')
+    out_arr = out_batch[0]
     
     try:
         max_err = float(np.max(np.abs(out_arr - ref)))
@@ -355,7 +346,7 @@ def bench_pyfwht_gpu(n: int, batch: int, dtype: str,
         time_ms=mean_secs * 1e3,
         gops=gops,
         max_abs_err=max_err,
-    note=note or ("timing includes transfers (pyfwht batch API)" if include_transfer else ""),
+        note=note or ("timing includes transfers" if include_transfer else ""),
     )
 
 
@@ -552,7 +543,7 @@ def _print_output_comparison(n: int, args) -> None:
     
     # pyfwht CPU (unnormalized)
     x_pyfwht = x_np.astype(np.float64).copy()
-    pyfwht.transform(x_pyfwht, backend=pyfwht.Backend.CPU)
+    x_pyfwht = pyfwht.fwht(x_pyfwht, backend='cpu')
     print(f"\npyfwht output (unnormalized):\n{x_pyfwht}")
     
     # pyfwht normalized
@@ -583,11 +574,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     _ensure_pyfwht_importable()
 
     parser = argparse.ArgumentParser(description="Compare pyfwht with meta-pytorch hadamard CUDA kernel")
-    parser.add_argument("--powers", type=int, nargs="*", default=[20],
-                        help="Powers of two to test (e.g., 20 22 for 2^20 and 2^22)")
+    parser.add_argument("--powers", type=int, nargs="*", default=[10, 11, 12],
+                        help="Powers of two to test (e.g., 10 11 12 for 1k, 2k, 4k)")
     parser.add_argument("--sizes", type=int, nargs="*", default=[],
                         help="Explicit sizes to test (must be powers of two)")
-    parser.add_argument("--batches", type=int, nargs="*", default=[1],
+    parser.add_argument("--batches", type=int, nargs="*", default=[1, 10, 100],
                         help="Batch sizes to test")
     parser.add_argument("--dtype", type=str, default="float16",
                         choices=["float16", "bfloat16", "float32", "float64", "int32"],

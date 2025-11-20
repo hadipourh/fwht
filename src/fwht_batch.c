@@ -19,8 +19,8 @@
 #include <string.h>
 #include <stdint.h>
 
-/* Portable aligned allocation */
-static void* fwht_aligned_alloc(size_t alignment, size_t size) {
+/* Portable aligned allocation for batch operations */
+static void* fwht_batch_aligned_alloc(size_t alignment, size_t size) {
 #if defined(_ISOC11_SOURCE) || (defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L)
     return aligned_alloc(alignment, size);
 #elif defined(_POSIX_C_SOURCE) && _POSIX_C_SOURCE >= 200112L
@@ -84,7 +84,7 @@ static void fwht_i32_batch_avx2_kernel(int32_t** FWHT_RESTRICT data_array,
     const size_t simd_width = 8;
     
     /* Allocate transposed buffer for SIMD processing */
-    __m256i* lanes = (__m256i*)fwht_aligned_alloc(32, n * sizeof(__m256i));
+    __m256i* lanes = (__m256i*)fwht_batch_aligned_alloc(32, n * sizeof(__m256i));
     if (!lanes) return;  /* Fallback to scalar if allocation fails */
     
     /* Transpose: gather elements from 8 arrays into SIMD lanes */
@@ -131,7 +131,7 @@ static void fwht_f64_batch_avx2_kernel(double** FWHT_RESTRICT data_array,
                                         size_t n, size_t batch_offset) {
     const size_t simd_width = 4;  /* AVX2: 4 doubles per register */
     
-    __m256d* lanes = (__m256d*)fwht_aligned_alloc(32, n * sizeof(__m256d));
+    __m256d* lanes = (__m256d*)fwht_batch_aligned_alloc(32, n * sizeof(__m256d));
     if (!lanes) return;
     
     /* Transpose */
@@ -185,7 +185,7 @@ static void fwht_i32_batch_neon_kernel(int32_t** FWHT_RESTRICT data_array,
                                         size_t n, size_t batch_offset) {
     const size_t simd_width = 4;  /* NEON: 4 int32s per register */
     
-    int32x4_t* lanes = (int32x4_t*)fwht_aligned_alloc(16, n * sizeof(int32x4_t));
+    int32x4_t* lanes = (int32x4_t*)fwht_batch_aligned_alloc(16, n * sizeof(int32x4_t));
     if (!lanes) return;
     
     /* Transpose */
@@ -231,7 +231,7 @@ static void fwht_f64_batch_neon_kernel(double** FWHT_RESTRICT data_array,
                                         size_t n, size_t batch_offset) {
     const size_t simd_width = 2;  /* NEON: 2 doubles per register */
     
-    float64x2_t* lanes = (float64x2_t*)fwht_aligned_alloc(16, n * sizeof(float64x2_t));
+    float64x2_t* lanes = (float64x2_t*)fwht_batch_aligned_alloc(16, n * sizeof(float64x2_t));
     if (!lanes) return;
     
     /* Transpose */
@@ -285,14 +285,11 @@ fwht_status_t fwht_i32_batch(int32_t** data_array, size_t n, size_t batch_size) 
     if (n == 0 || (n & (n - 1)) != 0) return FWHT_ERROR_INVALID_SIZE;
     if (batch_size == 0) return FWHT_ERROR_INVALID_ARGUMENT;
     
-    /* For large n or small batch, use existing OpenMP batch function */
-    if (n > 256 || batch_size < FWHT_SIMD_WIDTH_I32) {
-        /* Fall back to existing batch implementation */
-        for (size_t i = 0; i < batch_size; i++) {
-            fwht_status_t status = fwht_i32(data_array[i], n);
-            if (status != FWHT_SUCCESS) return status;
-        }
-        return FWHT_SUCCESS;
+    /* For large n or small batch, use context-based batch API which handles GPU properly */
+    /* Note: n >= 256 routes to context API to allow GPU for n=256 if recommended */
+    if (n >= 256 || batch_size < FWHT_SIMD_WIDTH_I32) {
+        /* Use context API which properly handles GPU batches */
+        return fwht_batch_i32(NULL, data_array, n, (int)batch_size);
     }
     
     /* Process in SIMD-width chunks */
@@ -341,13 +338,11 @@ fwht_status_t fwht_f64_batch(double** data_array, size_t n, size_t batch_size) {
     if (n == 0 || (n & (n - 1)) != 0) return FWHT_ERROR_INVALID_SIZE;
     if (batch_size == 0) return FWHT_ERROR_INVALID_ARGUMENT;
     
-    /* For large n or small batch, use existing implementation */
-    if (n > 256 || batch_size < FWHT_SIMD_WIDTH_F64) {
-        for (size_t i = 0; i < batch_size; i++) {
-            fwht_status_t status = fwht_f64(data_array[i], n);
-            if (status != FWHT_SUCCESS) return status;
-        }
-        return FWHT_SUCCESS;
+    /* For large n or small batch, use context-based batch API which handles GPU properly */
+    /* Note: n >= 256 routes to context API to allow GPU for n=256 if recommended */
+    if (n >= 256 || batch_size < FWHT_SIMD_WIDTH_F64) {
+        /* Use context API which properly handles GPU batches */
+        return fwht_batch_f64(NULL, data_array, n, (int)batch_size);
     }
     
     /* Process in SIMD-width chunks */
