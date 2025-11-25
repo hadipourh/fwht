@@ -579,6 +579,7 @@ LibFWHT uses true FP16 Tensor Cores (mma.f16.f16.f16.f16) for optimal performanc
 - Outputs unnormalized FWHT coefficients directly (±1 convention) with no post-kernel scaling
 - Maximum error: limited to the inherent FP16 mantissa (≤ 1 ULP of the result, e.g., 0.0625 at magnitude 2048)
 - Performance: Up to 1115 GOps/s @ n=4096 (NVIDIA RTX 4090)
+- **Source compatibility note:** The Tensor Core kernels are adapted from Meta's public `meta-pytorch/applied-ai` implementation (see `src/fwht_cuda_fp16.cuh`). We preserve their launch heuristics and size coverage (256…32768 points) but change one fundamental detail: Meta normalizes after each butterfly (`/√n`) whereas LibFWHT always exposes the *unnormalized* Walsh-Hadamard transform. Our fork therefore removes the per-stage normalization so the MMA path emits coefficients in the same scale as the rest of the library—no post-processing multiply is required, and integer callers can rely on consistent magnitude conventions across every backend.
 
 **Why small errors still exist:**
 

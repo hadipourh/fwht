@@ -1246,7 +1246,7 @@ static void benchmark_tensorcore_comparison() {
 
     print_tensorcore_sample_vector();
 
-    const size_t test_sizes[] = {256, 512, 1024, 4096, 8192};
+    const size_t test_sizes[] = {256, 512, 1024, 2048, 4096, 8192, 16384, 32768};
     const size_t batch_sizes[] = {1, 10, 100, 1000, 10000};
     
     for (size_t s = 0; s < sizeof(test_sizes)/sizeof(test_sizes[0]); s++) {

@@ -521,7 +521,7 @@ cleanup:
 }
 
 int main(int argc, char** argv) {
-    const size_t default_sizes[] = {256, 512, 1024, 4096, 16384};
+    const size_t default_sizes[] = {256, 512, 1024, 2048, 4096, 8192, 16384, 32768};
 
     bench_config_t cfg;
     cfg.sizes = default_sizes;
