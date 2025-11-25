@@ -1,0 +1,9 @@
+1. Antoine Joux, "Algorithmic Cryptanalysis," Chapman & Hall/CRC, 2009 – Describes the Fast Walsh-Hadamard Transform (Algorithm 9.3) implementation SboxU uses per component mask; reference for reproducing vectorial FWHT.
+2. Willi Meier and Othmar Staffelbach, "Fast Correlation Attacks on Stream Ciphers," EUROCRYPT 1989 – Provides the standard relation between Walsh maxima and Boolean-function nonlinearity (NL = 2^(n-1) - max|W|/2).
+3. Thomas Siegenthaler, "Correlation-Immunity of Nonlinear Combining Functions," IEEE Transactions on Information Theory, 1984 – Defines correlation immunity order via Walsh coefficients that vanish for masks up to a given Hamming weight.
+4. O.S. Rothaus, "On Bent Functions," Journal of Combinatorial Theory Series A, 1976 – Characterizes bent functions through constant-magnitude Walsh spectra (|W| = 2^(n/2)).
+5. Kaisa Nyberg, "Differentially Uniform Mappings for Cryptography," EUROCRYPT 1993 – Introduces differential uniformity/APN S-boxes linking WHT/DDT behavior for vectorial Boolean functions.
+6. Claude Carlet, Pascale Charpin, and Victor Zinoviev, "Codes, bent functions and permutations suitable for DES-like cryptosystems," Designs, Codes and Cryptography, 2000 – Defines CCZ-equivalence and relates Walsh-zero subspaces to CCZ invariants.
+7. T. Peyrin, Y. Todo, et al., "Improved TU Decomposition and Applications," IACR ePrint 2018/713 – Details TU projections derived from Walsh-zero spaces, used in SboxU for structural analysis.
+8. Marcelo Andrade, Guido Baruffa, et al., "High-Performance Walsh-Hadamard Transform on GPUs," Journal of Signal Processing Systems, 2014 – Discusses bank-conflict-aware GPU kernels inspiring libfwht’s planned auto-tuning.
+9. Anish Agarwal, Shubho Sengupta, et al., "HadaCore: Fast Walsh-Hadamard Transform Kernels for PyTorch," PyTorch Blog, 2024 – Demonstrates warp-shuffle/Tensor Core optimizations relevant for future libfwht GPU backends.

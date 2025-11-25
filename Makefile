@@ -36,7 +36,16 @@ else
 	CFLAGS += -march=native
 	CXXFLAGS += -march=native
 endif
-NVCCFLAGS = -O3 -I$(INCLUDE_DIR) --compiler-options -fPIC -std=c++17 -arch=sm_80
+NVCCFLAGS = -O3 -I$(INCLUDE_DIR) --compiler-options -fPIC -std=c++17
+CUDA_ARCH_LIST ?= 70 75 80 86 89 90
+ifneq ($(strip $(CUDA_ARCH_LIST)),)
+CUDA_ARCH_LIST_LAST := $(lastword $(CUDA_ARCH_LIST))
+NVCC_ARCH_FLAGS := $(foreach arch,$(CUDA_ARCH_LIST),-gencode arch=compute_$(arch),code=sm_$(arch))
+NVCC_ARCH_FLAGS += -gencode arch=compute_$(CUDA_ARCH_LIST_LAST),code=compute_$(CUDA_ARCH_LIST_LAST)
+else
+NVCC_ARCH_FLAGS := -arch=sm_80
+endif
+NVCCFLAGS += $(NVCC_ARCH_FLAGS)
 LDFLAGS =
 
 # Directories
@@ -60,6 +69,10 @@ EXAMPLE_SRC = $(EXAMPLES_DIR)/example_basic.c
 EXAMPLE_BIN = $(EXAMPLES_DIR)/example_basic
 EXAMPLE2_SRC = $(EXAMPLES_DIR)/example_boolean_packed.c
 EXAMPLE2_BIN = $(EXAMPLES_DIR)/example_boolean_packed
+EXAMPLE3_SRC = $(EXAMPLES_DIR)/example_batch.c
+EXAMPLE3_BIN = $(EXAMPLES_DIR)/example_batch
+EXAMPLE4_SRC = $(EXAMPLES_DIR)/example_gpu_multi_precision.cu
+EXAMPLE4_BIN = $(EXAMPLES_DIR)/example_gpu_multi_precision
 
 # Source files (CPU)
 SRCS = $(wildcard $(SRC_DIR)/*.c)
@@ -137,6 +150,11 @@ ifeq ($(HAS_CUDA),1)
     endif
 endif
 
+EXAMPLE_TARGETS = $(EXAMPLE_BIN) $(EXAMPLE2_BIN) $(EXAMPLE3_BIN)
+ifeq ($(USE_CUDA),1)
+EXAMPLE_TARGETS += $(EXAMPLE4_BIN)
+endif
+
 # ============================================================================
 # Build Targets
 # ============================================================================
@@ -182,11 +200,11 @@ else
 $(SHARED_LIB): $(OBJS)
 	@echo "Creating shared library: $@"
 	$(CC) $(SHARED_FLAGS) -o $@ $^ $(LDFLAGS)
+endif
 
 $(CLI_BIN): $(CLI_SRC) $(SHARED_LIB)
 	@echo "Building CLI tool: $@"
-	$(CC) $(CFLAGS) $< -L$(LIB_DIR) -lfwht -lm -o $@ -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
-endif
+	$(CC) $(CFLAGS) $< -L$(LIB_DIR) -lfwht $(CUDA_LDFLAGS) -lm -o $@ -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
 
 # Compile source files
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
@@ -204,7 +222,7 @@ $(BUILD_DIR)/%.o: $(TEST_DIR)/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # Build test executable
-test: directories $(STATIC_LIB) $(TEST_OBJS)
+test: directories lib $(TEST_OBJS)
 	@echo "Building test suite..."
 ifeq ($(USE_CUDA),1)
 	$(CXX) $(CXXFLAGS) $(TEST_OBJS) $(CUDA_OBJS) -L$(LIB_DIR) -lfwht $(CUDA_LDFLAGS) -o $(TEST_BIN) $(LDFLAGS) -lm -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
@@ -233,7 +251,7 @@ endif
 	@echo "Run with: ./build/fwht_bench [options]"
 
 # Build example programs
-examples: directories lib $(EXAMPLE_BIN) $(EXAMPLE2_BIN)
+examples: directories lib $(EXAMPLE_TARGETS)
 	@echo "Example binaries available in $(EXAMPLES_DIR)/"
 
 $(EXAMPLE_BIN): $(EXAMPLE_SRC) $(STATIC_LIB)
@@ -243,6 +261,16 @@ $(EXAMPLE_BIN): $(EXAMPLE_SRC) $(STATIC_LIB)
 $(EXAMPLE2_BIN): $(EXAMPLE2_SRC) $(STATIC_LIB)
 	@echo "Building example: $@"
 	$(CC) $(CFLAGS) $< -L$(LIB_DIR) -lfwht -lm -o $@ -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
+
+$(EXAMPLE3_BIN): $(EXAMPLE3_SRC) $(STATIC_LIB)
+	@echo "Building example: $@"
+	$(CC) $(CFLAGS) $< -L$(LIB_DIR) -lfwht -lm -o $@ -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
+
+ifeq ($(USE_CUDA),1)
+$(EXAMPLE4_BIN): $(EXAMPLE4_SRC) $(STATIC_LIB)
+	@echo "Building example: $@"
+	$(NVCC) $(NVCCFLAGS) $< -L$(LIB_DIR) -lfwht $(CUDA_LDFLAGS) -o $@ -Xlinker -rpath -Xlinker $(CURDIR)/$(LIB_DIR)
+endif
 
 # Build and run GPU-specific tests (only if CUDA available)
 test-gpu: lib
@@ -294,7 +322,7 @@ endif
 clean:
 	@echo "Cleaning build artifacts..."
 	rm -rf $(BUILD_DIR) $(LIB_DIR)
-	rm -f $(EXAMPLE_BIN) $(EXAMPLE2_BIN)
+	rm -f $(EXAMPLE_BIN) $(EXAMPLE2_BIN) $(EXAMPLE3_BIN) $(EXAMPLE4_BIN)
 
 # Install library (requires sudo on most systems)
 install: lib

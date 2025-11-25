@@ -1359,8 +1359,16 @@ fwht_status_t fwht_batch_i32(fwht_context_t* ctx, int32_t** data_array,
         fwht_status_t first_error = FWHT_SUCCESS;
         
         /* Disable nested parallelism to prevent deadlocks */
+    #if _OPENMP >= 200805
+        int old_max_active_levels = omp_get_max_active_levels();
+        if (old_max_active_levels < 1) {
+            old_max_active_levels = 1;
+        }
+        omp_set_max_active_levels(1);
+    #else
         int old_nested = omp_get_nested();
         omp_set_nested(0);
+    #endif
         
         /* Use CPU backend inside parallel region to avoid nested OpenMP calls */
         #pragma omp parallel for schedule(static)
@@ -1377,7 +1385,11 @@ fwht_status_t fwht_batch_i32(fwht_context_t* ctx, int32_t** data_array,
         }
         
         /* Restore nested parallelism setting */
+    #if _OPENMP >= 200805
+        omp_set_max_active_levels(old_max_active_levels);
+    #else
         omp_set_nested(old_nested);
+    #endif
         
         return first_error;
     }
@@ -1420,8 +1432,16 @@ fwht_status_t fwht_batch_f64(fwht_context_t* ctx, double** data_array,
         fwht_status_t first_error = FWHT_SUCCESS;
         
         /* Disable nested parallelism to prevent deadlocks */
+    #if _OPENMP >= 200805
+        int old_max_active_levels = omp_get_max_active_levels();
+        if (old_max_active_levels < 1) {
+            old_max_active_levels = 1;
+        }
+        omp_set_max_active_levels(1);
+    #else
         int old_nested = omp_get_nested();
         omp_set_nested(0);
+    #endif
         
         /* Use CPU backend inside parallel region to avoid nested OpenMP calls */
         #pragma omp parallel for schedule(static)
@@ -1438,7 +1458,11 @@ fwht_status_t fwht_batch_f64(fwht_context_t* ctx, double** data_array,
         }
         
         /* Restore nested parallelism setting */
+    #if _OPENMP >= 200805
+        omp_set_max_active_levels(old_max_active_levels);
+    #else
         omp_set_nested(old_nested);
+    #endif
         
         return first_error;
     }

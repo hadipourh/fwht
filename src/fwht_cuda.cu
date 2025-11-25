@@ -1687,6 +1687,66 @@ fwht_status_t fwht_batch_f64_cuda_from_pointers(double** data_array, size_t n, s
  * ============================================================================ */
 
 template <typename T>
+static fwht_status_t fwht_launch_wht_device_kernels(T* d_data,
+                                                    size_t n,
+                                                    size_t batch_size,
+                                                    cudaStream_t stream) {
+    unsigned int max_block_threads = fwht_cuda_max_threads_per_block();
+    fwht_status_t status;
+    if (n <= max_block_threads) {
+        if (g_fwht_dispatch_logging) {
+            fprintf(stderr,
+                    "[libfwht] dispatch (device): shared-memory kernel (n=%zu, batch=%zu)\n",
+                    n,
+                    batch_size);
+        }
+        status = fwht_launch_small<T>(d_data, n, batch_size, stream);
+    } else if (g_fwht_chunked_enabled && n >= 4096 && n <= 32768) {
+        if (g_fwht_dispatch_logging) {
+            fprintf(stderr,
+                    "[libfwht] dispatch (device): chunked kernel (n=%zu, batch=%zu)\n",
+                    n,
+                    batch_size);
+        }
+        status = fwht_launch_large_chunked<T>(d_data, n, batch_size, stream);
+    } else {
+        if (g_fwht_dispatch_logging) {
+            fprintf(stderr,
+                    "[libfwht] dispatch (device): stage kernel (n=%zu, batch=%zu)\n",
+                    n,
+                    batch_size);
+        }
+        status = fwht_launch_large<T>(d_data, n, batch_size, stream);
+    }
+    return status;
+}
+
+template <typename T>
+static fwht_status_t fwht_execute_cuda_device_async(T* d_data,
+                                                    size_t n,
+                                                    size_t batch_size,
+                                                    cudaStream_t stream) {
+    if (batch_size == 0) {
+        return FWHT_ERROR_INVALID_ARGUMENT;
+    }
+
+    g_fwht_last_metrics.valid = false;
+    g_fwht_last_metrics.samples = 0;
+
+    fwht_status_t init_status = fwht_cuda_ensure_device_state();
+    if (init_status != FWHT_SUCCESS) {
+        return init_status;
+    }
+
+    size_t element_count = n * batch_size;
+    if (element_count > SIZE_MAX / sizeof(T)) {
+        return FWHT_ERROR_INVALID_SIZE;
+    }
+
+    return fwht_launch_wht_device_kernels<T>(d_data, n, batch_size, stream);
+}
+
+template <typename T>
 static fwht_status_t fwht_execute_cuda_device(T* d_data, size_t n, size_t batch_size) {
     if (batch_size == 0) {
         return FWHT_ERROR_INVALID_ARGUMENT;
@@ -1733,25 +1793,7 @@ static fwht_status_t fwht_execute_cuda_device(T* d_data, size_t n, size_t batch_
         (void)cudaEventRecord(evt_kernel_start, stream);
     }
 
-    unsigned int max_block_threads = fwht_cuda_max_threads_per_block();
-    if (n <= max_block_threads) {
-        if (g_fwht_dispatch_logging) {
-            fprintf(stderr, "[libfwht] dispatch (device): shared-memory kernel (n=%zu, batch=%zu)\n", n, batch_size);
-        }
-        status = fwht_launch_small<T>(d_data, n, batch_size, stream);
-    } else if (g_fwht_chunked_enabled && n >= 4096 && n <= 32768) {
-        // Chunked coalesced kernel for medium-large sizes
-        if (g_fwht_dispatch_logging) {
-            fprintf(stderr, "[libfwht] dispatch (device): chunked kernel (n=%zu, batch=%zu)\n", n, batch_size);
-        }
-        status = fwht_launch_large_chunked<T>(d_data, n, batch_size, stream);
-    } else {
-        // Standard stage kernel for very large sizes
-        if (g_fwht_dispatch_logging) {
-            fprintf(stderr, "[libfwht] dispatch (device): stage kernel (n=%zu, batch=%zu)\n", n, batch_size);
-        }
-        status = fwht_launch_large<T>(d_data, n, batch_size, stream);
-    }
+    status = fwht_launch_wht_device_kernels<T>(d_data, n, batch_size, stream);
     if (status != FWHT_SUCCESS) {
         goto cleanup;
     }
@@ -1803,6 +1845,16 @@ fwht_status_t fwht_batch_i32_cuda_device(int32_t* d_data, size_t n, size_t batch
     if (n == 0 || (n & (n - 1)) != 0) return FWHT_ERROR_INVALID_SIZE;
     if (batch_size == 0) return FWHT_ERROR_INVALID_ARGUMENT;
     return fwht_execute_cuda_device<int32_t>(d_data, n, batch_size);
+}
+
+fwht_status_t fwht_batch_i32_cuda_device_async(int32_t* d_data,
+                                                size_t n,
+                                                size_t batch_size,
+                                                cudaStream_t stream) {
+    if (d_data == NULL) return FWHT_ERROR_NULL_POINTER;
+    if (n == 0 || (n & (n - 1)) != 0) return FWHT_ERROR_INVALID_SIZE;
+    if (batch_size == 0) return FWHT_ERROR_INVALID_ARGUMENT;
+    return fwht_execute_cuda_device_async<int32_t>(d_data, n, batch_size, stream);
 }
 
 fwht_status_t fwht_batch_f32_cuda_device(float* d_data, size_t n, size_t batch_size) {

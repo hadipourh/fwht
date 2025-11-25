@@ -154,41 +154,44 @@ if cuda_available:
         include_dirs_list.append(str(cuda_include))
         extra_link_args.extend([f'-L{cuda_lib}', '-lcudart'])
         
-        # Compile CUDA source file with nvcc
-        cuda_src = SRC_DIR / "fwht_cuda.cu"
-        cuda_obj = PYTHON_DIR / "build" / "fwht_cuda.o"
-        cuda_obj.parent.mkdir(exist_ok=True)
-        
-        print(f"Compiling CUDA source: {cuda_src}")
-        nvcc_cmd = [
-            'nvcc',
-            '-c',
-            str(cuda_src),
-            '-o', str(cuda_obj),
-            f'-I{INCLUDE_DIR}',
-            '-DUSE_CUDA=1',
-            '-Xcompiler', '-fPIC',
-            '--std=c++17',
-            '-arch=sm_80',
-            '-O3'
-        ]
-        # Allow users to append extra NVCC flags via environment (e.g., gencodes or std)
+        # Compile CUDA source files with nvcc
+        cuda_sources = ["fwht_cuda.cu", "fwht_cuda_lat.cu"]
+        cuda_objects = []
         extra_nvcc = os.environ.get('FWHT_NVCC_FLAGS', '').strip()
-        if extra_nvcc:
-            nvcc_cmd.extend(extra_nvcc.split())
-        print('NVCC command:', ' '.join(nvcc_cmd))
-        
-        result = subprocess.run(nvcc_cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            # Print both stdout and stderr to aid debugging in CI/pip wrapper
-            if result.stdout:
-                print("NVCC stdout:\n" + result.stdout)
-            if result.stderr:
-                print("NVCC stderr:\n" + result.stderr)
-            raise RuntimeError("Failed to compile CUDA source")
-        
-        cuda_objects = [str(cuda_obj)]
-        print(f"CUDA object file: {cuda_obj}")
+
+        for cuda_source in cuda_sources:
+            cuda_src = SRC_DIR / cuda_source
+            cuda_obj = PYTHON_DIR / "build" / (cuda_source.replace('.cu', '.o'))
+            cuda_obj.parent.mkdir(exist_ok=True)
+
+            print(f"Compiling CUDA source: {cuda_src}")
+            nvcc_cmd = [
+                'nvcc',
+                '-c',
+                str(cuda_src),
+                '-o', str(cuda_obj),
+                f'-I{INCLUDE_DIR}',
+                '-DUSE_CUDA=1',
+                '-Xcompiler', '-fPIC',
+                '--std=c++17',
+                '-arch=sm_80',
+                '-O3'
+            ]
+            if extra_nvcc:
+                nvcc_cmd.extend(extra_nvcc.split())
+            print('NVCC command:', ' '.join(nvcc_cmd))
+
+            result = subprocess.run(nvcc_cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                if result.stdout:
+                    print("NVCC stdout:\n" + result.stdout)
+                if result.stderr:
+                    print("NVCC stderr:\n" + result.stderr)
+                raise RuntimeError(f"Failed to compile CUDA source {cuda_source}")
+
+            cuda_objects.append(str(cuda_obj))
+            print(f"CUDA object file: {cuda_obj}")
+
         print("Enabled CUDA support")
     else:
         print("Warning: CUDA_HOME not found, disabling CUDA support")

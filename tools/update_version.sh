@@ -56,10 +56,9 @@ echo "  → tests/test_correctness.c"
 sed -i.bak "s/strcmp(version, \".*\")/strcmp(version, \"$NEW_VERSION\")/" tests/test_correctness.c
 rm tests/test_correctness.c.bak
 
-# Sync to Python package
+# Python bindings build directly against src/, so no sync step is required.
 echo ""
-echo "Running sync script to update Python package sources..."
-bash tools/sync_python.sh
+echo "Python bindings already include src/ sources (no sync step needed)."
 
 echo ""
 echo "✓ Version updated to $NEW_VERSION in all files"

@@ -1,6 +1,6 @@
 /*
  * Meta's FP16 Tensor Core Hadamard Transform - Adapted for libfwht
- * Source: meta-pytorch/applied-ai hadamard_transform_cuda.cu
+ * Based on the public meta-pytorch/applied-ai hadamard_transform_cuda.cu implementation
  * License: BSD 3-Clause (compatible with GPL-3.0)
  */
 
@@ -11,9 +11,26 @@
 #include <cuda_runtime.h>
 #include <stdint.h>
 
-// Type definitions matching Meta's implementation
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 800)
+#define FWHT_TENSOR_CORE_DISABLED_FOR_ARCH 1
+#endif
+
+// Type definitions matching Meta's implementation (available to both branches)
 typedef uint32_t b32;
 typedef uint16_t b16;
+
+// Forward declarations for host launch helpers so both branches share prototypes
+__host__ void launch_meta_hadamard_256(b16* data,
+                                       size_t transform_count = 1,
+                                       cudaStream_t stream = 0);
+__host__ void launch_meta_hadamard_512(b16* data,
+                                       size_t transform_count = 1,
+                                       cudaStream_t stream = 0);
+__host__ void launch_meta_hadamard_1024(b16* data,
+                                        size_t transform_count = 1,
+                                        cudaStream_t stream = 0);
+
+#if !defined(FWHT_TENSOR_CORE_DISABLED_FOR_ARCH)
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
@@ -700,22 +717,32 @@ __forceinline__ __host__ void run_kernel(b16* a_mat, b16* out, int num_chunks, c
 // Meta's exact configurations from launch_configs_big
 
 // n=256: chunks_per_warp=1, warps_per_block=1, blocks_per_sm=24, log_had_size=8
-__host__ void launch_meta_hadamard_256(b16* data, size_t transform_count = 1, cudaStream_t stream = 0) {
+__host__ void launch_meta_hadamard_256(b16* data, size_t transform_count, cudaStream_t stream) {
     int total_chunks = static_cast<int>(transform_count);
     run_kernel<true, 1, 1, 8, 24>(data, data, total_chunks, stream);
 }
 
 // n=512: chunks_per_warp=2, warps_per_block=1, blocks_per_sm=24, log_had_size=9
-__host__ void launch_meta_hadamard_512(b16* data, size_t transform_count = 1, cudaStream_t stream = 0) {
+__host__ void launch_meta_hadamard_512(b16* data, size_t transform_count, cudaStream_t stream) {
     int total_chunks = static_cast<int>(transform_count * 2);
     run_kernel<true, 2, 1, 9, 24>(data, data, total_chunks, stream);
 }
 
 // n=1024: chunks_per_warp=2, warps_per_block=2, blocks_per_sm=16, log_had_size=10  
 // Using launch_configs_big[1] = {2, 2, 16}
-__host__ void launch_meta_hadamard_1024(b16* data, size_t transform_count = 1, cudaStream_t stream = 0) {
+__host__ void launch_meta_hadamard_1024(b16* data, size_t transform_count, cudaStream_t stream) {
     int total_chunks = static_cast<int>(transform_count * 4);
     run_kernel<true, 2, 2, 10, 16>(data, data, total_chunks, stream);
 }
+
+#else /* FWHT_TENSOR_CORE_DISABLED_FOR_ARCH */
+
+// Stub implementations for architectures that cannot assemble Tensor Core kernels.
+// The caller will fall back to the generic fp16 path when these no-ops are used.
+inline __host__ void launch_meta_hadamard_256(b16*, size_t, cudaStream_t) {}
+inline __host__ void launch_meta_hadamard_512(b16*, size_t, cudaStream_t) {}
+inline __host__ void launch_meta_hadamard_1024(b16*, size_t, cudaStream_t) {}
+
+#endif /* FWHT_TENSOR_CORE_DISABLED_FOR_ARCH */
 
 #endif // FWHT_CUDA_FP16_CUH

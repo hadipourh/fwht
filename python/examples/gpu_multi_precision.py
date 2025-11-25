@@ -6,10 +6,40 @@ Demonstrates how to use fp64, fp32, and fp16 precision modes on GPU
 for different speed/accuracy trade-offs.
 """
 
-import torch
+from __future__ import annotations
+
+import math
+import time
+
 import numpy as np
+import torch
+
 import pyfwht
 
+
+def _fwht_ops(n: int) -> int:
+    """Return total floating ops (add/sub) for one FWHT of size n."""
+    return 2 * n * int(math.log2(n))
+
+
+def _measure_fp16_throughput(n: int, batch_sizes: list[int], repeats: int = 20) -> dict[int, float]:
+    """Measure fp16 batch throughput (GOps/s) for the requested batch sizes."""
+    stats: dict[int, float] = {}
+    for batch in batch_sizes:
+        data = torch.randn(batch, n, dtype=torch.float16, device="cuda")
+        pyfwht.gpu.batch_transform_dlpack(data)  # warmup
+        torch.cuda.synchronize()
+
+        start = time.perf_counter()
+        for _ in range(max(1, repeats)):
+            pyfwht.gpu.batch_transform_dlpack(data)
+        torch.cuda.synchronize()
+        elapsed = (time.perf_counter() - start) / max(1, repeats)
+        if elapsed <= 0:
+            continue
+        gops = (_fwht_ops(n) * batch) / (elapsed * 1e9)
+        stats[batch] = gops
+    return stats
 def main():
     # Check GPU availability
     if not pyfwht.has_gpu():
@@ -104,10 +134,23 @@ def main():
     print("  • Perfect when approximate Walsh spectrum suffices")
     print()
     
-    print("=" * 70)
     print("Performance Tip: Use larger batches for better GPU utilization!")
-    print("  • batch=1:   ~7 GOps/s (fp16)")
-    print("  • batch=100: ~739 GOps/s (fp16) - 100× better!")
+    try:
+        targets = sorted(set([1, max(1, batch_size)]))
+        stats = _measure_fp16_throughput(n, targets)
+        if stats:
+            for b in sorted(stats):
+                print(f"  • batch={b}: ~{stats[b]:.2f} GOps/s (fp16)")
+            if len(stats) >= 2:
+                smallest = min(stats)
+                largest = max(stats)
+                ratio = stats[largest] / stats[smallest] if stats[smallest] > 0 else float('inf')
+                print(f"    → {ratio:.0f}× throughput jump from batch={smallest} to batch={largest}")
+        else:
+            print("  • Unable to measure throughput (no statistics recorded)")
+    except Exception as exc:  # pragma: no cover - best effort hint
+        print(f"  • Skipped dynamic throughput measurement ({exc})")
+    print("=" * 70)
     print("=" * 70)
 
 if __name__ == '__main__':

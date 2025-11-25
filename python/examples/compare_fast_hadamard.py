@@ -7,7 +7,8 @@ This script benchmarks:
 
 Notes:
 - Dao-AILab library is GPU-only (CUDA). It supports fp16, bfloat16, and fp32, up to dim=32768.
-- libfwht supports int32 and float64 on GPU (no fp16/fp32 at the moment). We report throughput for both.
+- libfwht supports int32, fp64, fp32, and fp16 (with Tensor Cores) on GPU.
+- FP16 Tensor Core support: n=256, 512, 1024, 2048, 4096, 8192, 16384, 32768.
 - Results are memory-bandwidth bound; dtype differences mainly affect bytes moved and math mode.
 
 Prereqs:

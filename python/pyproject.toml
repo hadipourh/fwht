@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyfwht"
-version = "1.1.4"
+version = "2.0.0"
 description = "Fast Walsh-Hadamard Transform with CPU, OpenMP, and CUDA backends"
 authors = [{name = "Hosein Hadipour", email = "hsn.hadipour@gmail.com"}]
 readme = "README.md"
@@ -53,6 +53,17 @@ dev = [
     "black>=23.0",
     "mypy>=1.0",
     "ruff>=0.1.0"
+]
+gpu = [
+    "torch>=2.0.0"
+]
+all = [
+    "pytest>=7.0",
+    "pytest-benchmark>=4.0",
+    "black>=23.0",
+    "mypy>=1.0",
+    "ruff>=0.1.0",
+    "torch>=2.0.0"
 ]
 
 [tool.black]
