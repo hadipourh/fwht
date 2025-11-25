@@ -29,6 +29,26 @@ __host__ void launch_meta_hadamard_512(b16* data,
 __host__ void launch_meta_hadamard_1024(b16* data,
                                         size_t transform_count = 1,
                                         cudaStream_t stream = 0);
+__host__ void launch_meta_hadamard_2048(b16* data,
+                                        size_t transform_count = 1,
+                                        cudaStream_t stream = 0);
+__host__ void launch_meta_hadamard_4096(b16* data,
+                                        size_t transform_count = 1,
+                                        cudaStream_t stream = 0);
+__host__ void launch_meta_hadamard_8192(b16* data,
+                                        size_t transform_count = 1,
+                                        cudaStream_t stream = 0);
+__host__ void launch_meta_hadamard_16384(b16* data,
+                                         size_t transform_count = 1,
+                                         cudaStream_t stream = 0);
+__host__ void launch_meta_hadamard_32768(b16* data,
+                                         size_t transform_count = 1,
+                                         cudaStream_t stream = 0);
+
+__host__ bool launch_meta_hadamard_fp16(b16* data,
+                                        size_t hadamard_size,
+                                        size_t transform_count = 1,
+                                        cudaStream_t stream = 0);
 
 #if !defined(FWHT_TENSOR_CORE_DISABLED_FOR_ARCH)
 
@@ -152,10 +172,10 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
     }
 
     // generate hadamard 16x16 (up to 2 of them)
-    constexpr b16 fp16_1p[4] = {0b0011100110101000, 0b0011100000000000, 0b0011010110101000, 0b0011010000000000};
-    constexpr b16 fp16_1n[4] = {0b1011100110101000, 0b1011100000000000, 0b1011010110101000, 0b1011010000000000};
-    constexpr b16 bf16_1p[4] = {0b0011111100110101, 0b0011111100000000, 0b0011111010110101, 0b0011111010000000};
-    constexpr b16 bf16_1n[4] = {0b1011111100110101, 0b1011111100000000, 0b1011111010110101, 0b1011111010000000};
+    constexpr b16 fp16_1p[4] = {0b0011110000000000, 0b0011110000000000, 0b0011110000000000, 0b0011110000000000};
+    constexpr b16 fp16_1n[4] = {0b1011110000000000, 0b1011110000000000, 0b1011110000000000, 0b1011110000000000};
+    constexpr b16 bf16_1p[4] = {0b0011111110000000, 0b0011111110000000, 0b0011111110000000, 0b0011111110000000};
+    constexpr b16 bf16_1n[4] = {0b1011111110000000, 0b1011111110000000, 0b1011111110000000, 0b1011111110000000};
 
     #define val_type_1p(i) (((is_fp16) == true) ? (fp16_1p[i]) : (bf16_1p[i]))
     #define val_type_1n(i) (((is_fp16) == true) ? (fp16_1n[i]) : (bf16_1n[i]))
@@ -716,23 +736,61 @@ __forceinline__ __host__ void run_kernel(b16* a_mat, b16* out, int num_chunks, c
 // Simple launcher functions for common sizes
 // Meta's exact configurations from launch_configs_big
 
-// n=256: chunks_per_warp=1, warps_per_block=1, blocks_per_sm=24, log_had_size=8
 __host__ void launch_meta_hadamard_256(b16* data, size_t transform_count, cudaStream_t stream) {
     int total_chunks = static_cast<int>(transform_count);
     run_kernel<true, 1, 1, 8, 24>(data, data, total_chunks, stream);
 }
 
-// n=512: chunks_per_warp=2, warps_per_block=1, blocks_per_sm=24, log_had_size=9
 __host__ void launch_meta_hadamard_512(b16* data, size_t transform_count, cudaStream_t stream) {
     int total_chunks = static_cast<int>(transform_count * 2);
     run_kernel<true, 2, 1, 9, 24>(data, data, total_chunks, stream);
 }
 
-// n=1024: chunks_per_warp=2, warps_per_block=2, blocks_per_sm=16, log_had_size=10  
-// Using launch_configs_big[1] = {2, 2, 16}
 __host__ void launch_meta_hadamard_1024(b16* data, size_t transform_count, cudaStream_t stream) {
     int total_chunks = static_cast<int>(transform_count * 4);
     run_kernel<true, 2, 2, 10, 16>(data, data, total_chunks, stream);
+}
+
+__host__ void launch_meta_hadamard_2048(b16* data, size_t transform_count, cudaStream_t stream) {
+    int total_chunks = static_cast<int>(transform_count * 8);
+    run_kernel<true, 2, 4, 11, 8>(data, data, total_chunks, stream);
+}
+
+__host__ void launch_meta_hadamard_4096(b16* data, size_t transform_count, cudaStream_t stream) {
+    int total_chunks = static_cast<int>(transform_count * 16);
+    run_kernel<true, 2, 8, 12, 4>(data, data, total_chunks, stream);
+}
+
+__host__ void launch_meta_hadamard_8192(b16* data, size_t transform_count, cudaStream_t stream) {
+    int total_chunks = static_cast<int>(transform_count * 32);
+    run_kernel<true, 2, 16, 13, 3>(data, data, total_chunks, stream);
+}
+
+__host__ void launch_meta_hadamard_16384(b16* data, size_t transform_count, cudaStream_t stream) {
+    int total_chunks = static_cast<int>(transform_count * 64);
+    run_kernel<true, 4, 16, 14, 2>(data, data, total_chunks, stream);
+}
+
+__host__ void launch_meta_hadamard_32768(b16* data, size_t transform_count, cudaStream_t stream) {
+    int total_chunks = static_cast<int>(transform_count * 128);
+    run_kernel<true, 8, 16, 15, 1>(data, data, total_chunks, stream);
+}
+
+inline __host__ bool launch_meta_hadamard_fp16(b16* data,
+                                               size_t hadamard_size,
+                                               size_t transform_count,
+                                               cudaStream_t stream) {
+    switch (hadamard_size) {
+        case 256:   launch_meta_hadamard_256(data, transform_count, stream);   return true;
+        case 512:   launch_meta_hadamard_512(data, transform_count, stream);   return true;
+        case 1024:  launch_meta_hadamard_1024(data, transform_count, stream);  return true;
+        case 2048:  launch_meta_hadamard_2048(data, transform_count, stream);  return true;
+        case 4096:  launch_meta_hadamard_4096(data, transform_count, stream);  return true;
+        case 8192:  launch_meta_hadamard_8192(data, transform_count, stream);  return true;
+        case 16384: launch_meta_hadamard_16384(data, transform_count, stream); return true;
+        case 32768: launch_meta_hadamard_32768(data, transform_count, stream); return true;
+        default:    return false;
+    }
 }
 
 #else /* FWHT_TENSOR_CORE_DISABLED_FOR_ARCH */
@@ -742,6 +800,12 @@ __host__ void launch_meta_hadamard_1024(b16* data, size_t transform_count, cudaS
 inline __host__ void launch_meta_hadamard_256(b16*, size_t, cudaStream_t) {}
 inline __host__ void launch_meta_hadamard_512(b16*, size_t, cudaStream_t) {}
 inline __host__ void launch_meta_hadamard_1024(b16*, size_t, cudaStream_t) {}
+inline __host__ void launch_meta_hadamard_2048(b16*, size_t, cudaStream_t) {}
+inline __host__ void launch_meta_hadamard_4096(b16*, size_t, cudaStream_t) {}
+inline __host__ void launch_meta_hadamard_8192(b16*, size_t, cudaStream_t) {}
+inline __host__ void launch_meta_hadamard_16384(b16*, size_t, cudaStream_t) {}
+inline __host__ void launch_meta_hadamard_32768(b16*, size_t, cudaStream_t) {}
+inline __host__ bool launch_meta_hadamard_fp16(b16*, size_t, size_t, cudaStream_t) { return false; }
 
 #endif /* FWHT_TENSOR_CORE_DISABLED_FOR_ARCH */
 

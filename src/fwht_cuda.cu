@@ -80,7 +80,7 @@ static inline bool fwht_tensorcore_arch_supported(int compute_cap) {
 }
 
 static inline bool fwht_tensorcore_size_supported(unsigned int n) {
-    return (n == 256) || (n == 512) || (n == 1024);
+    return (n >= 256u) && (n <= 32768u) && ((n & (n - 1u)) == 0u);
 }
 
 static void fwht_tensorcore_log_unavailable(const char* reason,
@@ -2315,37 +2315,18 @@ __global__ void hadamard_transform_fp16_butterfly(
     reinterpret_cast<__half*>(data)[tid] = shared[tid];
 }
 
-__global__ void scale_fp16_kernel(__half* data, size_t n, float scale) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= n) return;
-    float val = __half2float(data[idx]);
-    data[idx] = __float2half(val * scale);
-}
-
-static inline void scale_fp16_buffer(b16* data, size_t n, float scale, cudaStream_t stream) {
-    int threads = 256;
-    int blocks = (int)((n + threads - 1) / threads);
-    __half* half_ptr = reinterpret_cast<__half*>(data);
-    scale_fp16_kernel<<<blocks, threads, 0, stream>>>(half_ptr, n, scale);
-}
-
 bool launch_fp16_butterfly_kernel(b16* data, size_t n, size_t batch_size, cudaStream_t stream) {
-    if (n > 1024) return false;
-    
-    // Use Meta's Tensor Core kernels for supported sizes
-    if (n == 256) {
-        launch_meta_hadamard_256(data, batch_size, stream);
-        return true;
+    if (n >= 256) {
+        if (launch_meta_hadamard_fp16(data, n, batch_size, stream)) {
+            return true;
+        }
     }
-    if (n == 512) {
-        launch_meta_hadamard_512(data, batch_size, stream);
-        return true;
+
+    if (n > 1024) {
+        return false;
     }
-    if (n == 1024) {
-        launch_meta_hadamard_1024(data, batch_size, stream);
-        return true;
-    }
-    // Fallback to scalar butterfly for other sizes
+
+    // Fallback to scalar butterfly for smaller sizes or when tensor cores unavailable
     size_t smem = 2 * n * sizeof(__half);
     for (size_t i = 0; i < batch_size; ++i) {
         hadamard_transform_fp16_butterfly<<<1, n, smem, stream>>>(data + i * n, n);
@@ -2355,7 +2336,7 @@ bool launch_fp16_butterfly_kernel(b16* data, size_t n, size_t batch_size, cudaSt
 
 int fwht_batch_f16_cuda_device_tensorcore(const uint16_t* d_in, uint16_t* d_out, size_t n, size_t batch_size) {
     if (!d_in || !d_out || batch_size == 0) return FWHT_ERROR_NULL_POINTER;
-    if (!is_power_of_2(n) || n > 1024) return FWHT_ERROR_INVALID_SIZE;
+    if (!is_power_of_2(n) || n > 32768) return FWHT_ERROR_INVALID_SIZE;
     cudaError_t err = cudaSuccess;
     
     if (d_in != d_out) {
@@ -2369,17 +2350,11 @@ int fwht_batch_f16_cuda_device_tensorcore(const uint16_t* d_in, uint16_t* d_out,
     }
     
     cudaStream_t stream = 0;
-    float unnormalize_scale = sqrtf(static_cast<float>(n));
-
     bool used_tensor_core = launch_fp16_butterfly_kernel(d_out, n, batch_size, stream);
     err = cudaGetLastError();
     if (err != cudaSuccess) {
         fprintf(stderr, "Tensor Core launch failed for n=%zu, batch=%zu: %s\n", n, batch_size, cudaGetErrorString(err));
         return FWHT_ERROR_CUDA;
-    }
-
-    if (used_tensor_core) {
-        scale_fp16_buffer(d_out, n * batch_size, unnormalize_scale, stream);
     }
 
     err = cudaDeviceSynchronize();
