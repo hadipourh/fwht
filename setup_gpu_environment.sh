@@ -52,29 +52,17 @@ pip install torch --index-url https://download.pytorch.org/whl/cu124
 echo "✓ Python dependencies installed"
 echo ""
 
-# Step 2: Install Meta's fast-hadamard-transform library (with patch)
-echo "=== Step 2/5: Installing Meta's fast-hadamard-transform ==="
+# Step 2: Install Meta's fast-hadamard-transform library (optional)
+echo "=== Step 2/5: Installing Meta's fast-hadamard-transform (optional) ==="
+echo "This kernel is only required for side-by-side comparisons. Skipping is safe."
 pip uninstall -y fast-hadamard-transform 2>/dev/null || true
 
-# Use the patching script
-if [ -f "tools/install_meta_with_patch.sh" ]; then
-    bash tools/install_meta_with_patch.sh || {
-        echo "ERROR: Failed to install Meta library."
-        echo "This is optional - pyfwht will still work without it."
-        echo "Continue? (y/n)"
-        read -r response
-        if [[ ! "$response" =~ ^[Yy]$ ]]; then
-            exit 1
-        fi
-    }
+export FORCE_CUDA=1
+export TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"
+if pip install git+https://github.com/Dao-AILab/fast-hadamard-transform.git --no-build-isolation; then
+    echo "✓ Meta library installed"
 else
-    echo "WARNING: tools/install_meta_with_patch.sh not found"
-    echo "Trying direct install (may fail with CUDA version mismatch)..."
-    export FORCE_CUDA=1
-    export TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"
-    pip install git+https://github.com/Dao-AILab/fast-hadamard-transform.git --no-build-isolation || {
-        echo "WARNING: Meta library installation failed (this is optional)"
-    }
+    echo "⚠ Meta library installation failed (continuing without it)"
 fi
 echo ""
 
@@ -177,13 +165,10 @@ if [ $? -eq 0 ]; then
     echo "  1. Run correctness + performance benchmark:"
     echo "     python python/tests/benchmark_all_precisions_fixed.py"
     echo ""
-    echo "  2. Compare with Meta library:"
-    echo "     python tools/compare_libs.py --sizes 1024 2048 4096 --batches 1 100 --dtype float16"
+    echo "  2. Run Python test suite (from repo root):"
+    echo "     python -m pytest python/tests -v"
     echo ""
-    echo "  3. Run test suite:"
-    echo "     cd python && pytest tests/ -v"
-    echo ""
-    echo "  4. GPU multi-precision example:"
+    echo "  3. GPU multi-precision example:"
     echo "     python python/examples/gpu_multi_precision.py"
     echo ""
 else

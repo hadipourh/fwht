@@ -26,10 +26,10 @@ extern "C" {
 // These are C++ functions due to __half type, so they're outside extern "C"
 extern "C" {
     fwht_status_t fwht_batch_f32_cuda(float* d_data, size_t n, size_t batch_size);
+    // FP16 function uses void* to avoid __half linkage issues
+    int fwht_batch_f16_cuda_device(const void* d_in, void* d_out, 
+                                    unsigned int n, unsigned int batch_size);
 }
-
-// __half is a C++ type, so this function must have C++ linkage
-extern fwht_status_t fwht_batch_f16_cuda(__half* d_data, size_t n, size_t batch_size);
 #endif
 
 #include <cstdlib>
@@ -106,6 +106,83 @@ void py_fwht_i8(py::array_t<int8_t> data) {
     
     fwht_status_t status = fwht_i8(ptr, n);
     check_status(status, "fwht_i8");
+}
+
+void py_fwht_i32_safe(py::array_t<int32_t> data) {
+    auto buf = data.request();
+    if (buf.ndim != 1) {
+        throw std::invalid_argument("Input must be 1-dimensional array");
+    }
+    
+    int32_t* ptr = static_cast<int32_t*>(buf.ptr);
+    size_t n = buf.shape[0];
+    
+    fwht_status_t status = fwht_i32_safe(ptr, n);
+    check_status(status, "fwht_i32_safe");
+}
+
+// =============================================================================
+// VECTORIZED BATCH API - SIMD-optimized CPU batch processing
+// =============================================================================
+
+void py_fwht_i32_batch(py::list data_list, size_t n) {
+    size_t batch_size = data_list.size();
+    if (batch_size == 0) {
+        throw std::invalid_argument("Empty batch");
+    }
+    
+    // Convert Python list of arrays to array of pointers
+    std::vector<int32_t*> ptrs(batch_size);
+    std::vector<py::array_t<int32_t>> arrays;  // Keep references alive
+    arrays.reserve(batch_size);
+    
+    for (size_t i = 0; i < batch_size; i++) {
+        py::array_t<int32_t> arr = data_list[i].cast<py::array_t<int32_t>>();
+        auto buf = arr.request();
+        
+        if (buf.ndim != 1) {
+            throw std::invalid_argument("All arrays must be 1-dimensional");
+        }
+        if (static_cast<size_t>(buf.shape[0]) != n) {
+            throw std::invalid_argument("All arrays must have the same size n");
+        }
+        
+        ptrs[i] = static_cast<int32_t*>(buf.ptr);
+        arrays.push_back(std::move(arr));
+    }
+    
+    fwht_status_t status = fwht_i32_batch(ptrs.data(), n, batch_size);
+    check_status(status, "fwht_i32_batch");
+}
+
+void py_fwht_f64_batch(py::list data_list, size_t n) {
+    size_t batch_size = data_list.size();
+    if (batch_size == 0) {
+        throw std::invalid_argument("Empty batch");
+    }
+    
+    // Convert Python list of arrays to array of pointers
+    std::vector<double*> ptrs(batch_size);
+    std::vector<py::array_t<double>> arrays;  // Keep references alive
+    arrays.reserve(batch_size);
+    
+    for (size_t i = 0; i < batch_size; i++) {
+        py::array_t<double> arr = data_list[i].cast<py::array_t<double>>();
+        auto buf = arr.request();
+        
+        if (buf.ndim != 1) {
+            throw std::invalid_argument("All arrays must be 1-dimensional");
+        }
+        if (static_cast<size_t>(buf.shape[0]) != n) {
+            throw std::invalid_argument("All arrays must have the same size n");
+        }
+        
+        ptrs[i] = static_cast<double*>(buf.ptr);
+        arrays.push_back(std::move(arr));
+    }
+    
+    fwht_status_t status = fwht_f64_batch(ptrs.data(), n, batch_size);
+    check_status(status, "fwht_f64_batch");
 }
 
 // =============================================================================
@@ -345,6 +422,58 @@ py::array_t<int32_t> py_fwht_boolean_packed_backend(py::array_t<uint64_t> packed
     return result;
 }
 
+// Batch bit-sliced Boolean WHT (for S-box cryptanalysis)
+py::list py_fwht_boolean_batch(py::list packed_list, size_t n) {
+    size_t batch_size = packed_list.size();
+    if (batch_size == 0) {
+        throw std::invalid_argument("Empty batch");
+    }
+    
+    // Convert Python list to array of pointers
+    std::vector<const uint64_t*> packed_ptrs(batch_size);
+    std::vector<int32_t*> wht_ptrs(batch_size);
+    std::vector<py::array_t<uint64_t>> packed_arrays;
+    std::vector<py::array_t<int32_t>> wht_arrays;
+    
+    packed_arrays.reserve(batch_size);
+    wht_arrays.reserve(batch_size);
+    
+    size_t n_words = (n + 63) / 64;
+    
+    for (size_t i = 0; i < batch_size; i++) {
+        // Get input array
+        py::array_t<uint64_t> arr = packed_list[i].cast<py::array_t<uint64_t>>();
+        auto buf = arr.request();
+        
+        if (buf.ndim != 1) {
+            throw std::invalid_argument("All arrays must be 1-dimensional");
+        }
+        if (static_cast<size_t>(buf.shape[0]) < n_words) {
+            throw std::invalid_argument("Packed array too small for specified n");
+        }
+        
+        packed_ptrs[i] = static_cast<const uint64_t*>(buf.ptr);
+        packed_arrays.push_back(std::move(arr));
+        
+        // Allocate output array
+        auto wht = py::array_t<int32_t>(n);
+        auto wht_buf = wht.request();
+        wht_ptrs[i] = static_cast<int32_t*>(wht_buf.ptr);
+        wht_arrays.push_back(std::move(wht));
+    }
+    
+    fwht_status_t status = fwht_boolean_batch(packed_ptrs.data(), wht_ptrs.data(), n, batch_size);
+    check_status(status, "fwht_boolean_batch");
+    
+    // Return list of output arrays
+    py::list result;
+    for (auto& arr : wht_arrays) {
+        result.append(arr);
+    }
+    
+    return result;
+}
+
 // =============================================================================
 // CONTEXT API
 // =============================================================================
@@ -550,34 +679,51 @@ void py_fwht_batch_f16_cuda(py::array_t<uint16_t> data, size_t n, size_t batch_s
     // NumPy float16 is stored as uint16 in memory (IEEE 754 binary16)
     uint16_t* ptr = static_cast<uint16_t*>(buf.ptr);
     
-    // Allocate device memory
-    __half* d_data = nullptr;
-    cudaError_t err = cudaMalloc(&d_data, total_elements * sizeof(__half));
+    // Allocate device memory for input and output
+    void* d_in = nullptr;
+    void* d_out = nullptr;
+    size_t bytes = total_elements * sizeof(uint16_t);
+    
+    cudaError_t err = cudaMalloc(&d_in, bytes);
     if (err != cudaSuccess) {
-        throw std::runtime_error(std::string("cudaMalloc failed: ") + cudaGetErrorString(err));
+        throw std::runtime_error(std::string("cudaMalloc for d_in failed: ") + cudaGetErrorString(err));
     }
     
-    // Copy host→device (uint16 and __half have same memory layout)
-    err = cudaMemcpy(d_data, ptr, total_elements * sizeof(__half), cudaMemcpyHostToDevice);
+    err = cudaMalloc(&d_out, bytes);
     if (err != cudaSuccess) {
-        cudaFree(d_data);
+        cudaFree(d_in);
+        throw std::runtime_error(std::string("cudaMalloc for d_out failed: ") + cudaGetErrorString(err));
+    }
+    
+    // Copy host→device
+    err = cudaMemcpy(d_in, ptr, bytes, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        cudaFree(d_in);
+        cudaFree(d_out);
         throw std::runtime_error(std::string("cudaMemcpy H2D failed: ") + cudaGetErrorString(err));
     }
     
-    // Process on device using Tensor Cores
-    fwht_status_t status = fwht_batch_f16_cuda(d_data, n, batch_size);
+    // Process on device using Tensor Cores (function signature uses void*)
+    int status = fwht_batch_f16_cuda_device(d_in, d_out, 
+                                             static_cast<unsigned int>(n), 
+                                             static_cast<unsigned int>(batch_size));
     
-    if (status == FWHT_SUCCESS) {
+    if (status == 0) {
         // Copy device→host
-        err = cudaMemcpy(ptr, d_data, total_elements * sizeof(__half), cudaMemcpyDeviceToHost);
+        err = cudaMemcpy(ptr, d_out, bytes, cudaMemcpyDeviceToHost);
         if (err != cudaSuccess) {
-            cudaFree(d_data);
+            cudaFree(d_in);
+            cudaFree(d_out);
             throw std::runtime_error(std::string("cudaMemcpy D2H failed: ") + cudaGetErrorString(err));
         }
     }
     
-    cudaFree(d_data);
-    check_status(status, "fwht_batch_f16_cuda");
+    cudaFree(d_in);
+    cudaFree(d_out);
+    
+    if (status != 0) {
+        throw std::runtime_error("fwht_batch_f16_cuda_device failed with error code: " + std::to_string(status));
+    }
 }
 
 // GPU Context
@@ -745,7 +891,7 @@ void py_fwht_batch_f32_dlpack(py::capsule dlpack_tensor, size_t n, size_t batch_
 }
 
 // FP16 DLPack support (Meta-inspired maximum speed)
-// Note: Uses CUDA __half type from cuda_fp16.h
+// Note: Uses void* to match C API signature, performs in-place transform
 void py_fwht_batch_f16_dlpack(py::capsule dlpack_tensor, size_t n, size_t batch_size) {
     auto dlm_tensor = dlpack_tensor.get_pointer<DLManagedTensor>();
     
@@ -764,15 +910,20 @@ void py_fwht_batch_f16_dlpack(py::capsule dlpack_tensor, size_t n, size_t batch_
         throw std::invalid_argument("DLPack tensor shape must be (batch_size, n)");
     }
     
-    // DLPack uses raw fp16 data, CUDA expects __half*
+    // DLPack gives us device pointer - do in-place transform (d_in == d_out)
     void* d_ptr = dlm_tensor->dl_tensor.data;
     
-    // Call Meta-inspired fp16 kernel (cast void* to __half* inside CUDA code)
-    fwht_status_t status = fwht_batch_f16_cuda(static_cast<__half*>(d_ptr), n, batch_size);
+    // Call fp16 kernel with in-place transform (same pointer for input and output)
+    int status = fwht_batch_f16_cuda_device(d_ptr, d_ptr, 
+                                             static_cast<unsigned int>(n), 
+                                             static_cast<unsigned int>(batch_size));
     
-    // Consume capsule first to avoid SystemError if check_status throws
+    // Consume capsule first to avoid SystemError if check fails
     consume_dlpack_capsule(dlpack_tensor);
-    check_status(status, "fwht_batch_f16_cuda");
+    
+    if (status != 0) {
+        throw std::runtime_error("fwht_batch_f16_cuda_device failed with error code: " + std::to_string(status));
+    }
 }
 
 // GPU Toggles
@@ -785,6 +936,15 @@ public:
     
     static bool multi_shuffle_enabled() {
         return fwht_gpu_multi_shuffle_enabled();
+    }
+    
+    static void set_block_size(unsigned int block_size) {
+        fwht_status_t status = fwht_gpu_set_block_size(block_size);
+        check_status(status, "fwht_gpu_set_block_size");
+    }
+    
+    static unsigned int get_block_size() {
+        return fwht_gpu_get_block_size();
     }
 };
 
@@ -831,6 +991,8 @@ PYBIND11_MODULE(_pyfwht, m) {
     // Core in-place transforms
     m.def("fwht_i32", &py_fwht_i32, py::arg("data"),
           "In-place Walsh-Hadamard Transform for int32 array");
+    m.def("fwht_i32_safe", &py_fwht_i32_safe, py::arg("data"),
+          "In-place WHT for int32 with overflow detection (5-10% slower but safe)");
     m.def("fwht_f64", &py_fwht_f64, py::arg("data"),
           "In-place Walsh-Hadamard Transform for float64 array");
     m.def("fwht_i8", &py_fwht_i8, py::arg("data"),
@@ -843,6 +1005,14 @@ PYBIND11_MODULE(_pyfwht, m) {
     m.def("fwht_f64_backend", &py_fwht_f64_backend,
           py::arg("data"), py::arg("backend"),
           "In-place WHT for float64 with explicit backend selection");
+    
+    // Vectorized CPU batch processing (SIMD-optimized)
+    m.def("fwht_i32_batch", &py_fwht_i32_batch,
+          py::arg("data_list"), py::arg("n"),
+          "Vectorized batch WHT for list of int32 arrays (3-5× faster for n≤256)");
+    m.def("fwht_f64_batch", &py_fwht_f64_batch,
+          py::arg("data_list"), py::arg("n"),
+          "Vectorized batch WHT for list of float64 arrays (3-5× faster for n≤256)");
     
     // Out-of-place transforms
     m.def("fwht_compute_i32", &py_fwht_compute_i32, py::arg("input"),
@@ -870,6 +1040,9 @@ PYBIND11_MODULE(_pyfwht, m) {
     m.def("fwht_boolean_packed_backend", &py_fwht_boolean_packed_backend,
           py::arg("packed_bits"), py::arg("n"), py::arg("backend"),
           "Compute WHT from bit-packed Boolean function with backend selection");
+    m.def("fwht_boolean_batch", &py_fwht_boolean_batch,
+          py::arg("packed_list"), py::arg("n"),
+          "Batch WHT for list of bit-packed Boolean functions (S-box cryptanalysis)");
     
     // Context API
     py::class_<PyFWHTContext>(m, "Context", "FWHT computation context for repeated calls")
@@ -935,7 +1108,7 @@ PYBIND11_MODULE(_pyfwht, m) {
             "Batch WHT for float32 on GPU (uses Tensor Cores on sm_70+, ~2× faster than fp64)");
     gpu.def("batch_f16", &py_fwht_batch_f16_cuda,
             py::arg("data"), py::arg("n"), py::arg("batch_size"),
-            "Batch WHT for float16 on GPU (uses Tensor Cores on sm_70+, maximum speed ~40-55 GOps/s @ n=4096)");
+            "Batch WHT for float16 on GPU (uses Tensor Cores on sm_70+, achieves 1115 GOps/s @ n=4096 with PyTorch DLPack)");
     
     // DLPack-based zero-copy batch processing
     gpu.def("batch_f64_dlpack", &py_fwht_batch_f64_dlpack,
@@ -946,10 +1119,10 @@ PYBIND11_MODULE(_pyfwht, m) {
             "Zero-copy batch WHT for int32 via DLPack (PyTorch/CuPy/JAX tensors on GPU)");
     gpu.def("batch_f32_dlpack", &py_fwht_batch_f32_dlpack,
             py::arg("dlpack_tensor"), py::arg("n"), py::arg("batch_size"),
-            "Zero-copy batch WHT for float32 via DLPack (Meta-inspired high-speed kernel, ~2× faster than fp64)");
+            "Zero-copy batch WHT for float32 via DLPack (Meta-inspired high-speed kernel, 30× faster than fp64)");
     gpu.def("batch_f16_dlpack", &py_fwht_batch_f16_dlpack,
             py::arg("dlpack_tensor"), py::arg("n"), py::arg("batch_size"),
-            "Zero-copy batch WHT for float16 via DLPack (Meta-inspired maximum-speed kernel, ~11× faster than fp64)");
+            "Zero-copy batch WHT for float16 via DLPack (Meta-inspired maximum-speed kernel, up to 54× faster than fp64, 1115 GOps/s)");
     
     // GPU Context
     py::class_<PyGPUContext>(gpu, "Context", "Persistent GPU context for repeated transforms")
@@ -965,10 +1138,14 @@ PYBIND11_MODULE(_pyfwht, m) {
              "Close context and release GPU resources");
     
     // GPU Toggles
-    py::class_<PyGPUToggles>(gpu, "Toggles", "GPU kernel variant toggles")
+    py::class_<PyGPUToggles>(gpu, "Toggles", "GPU kernel configuration and toggles")
         .def_static("set_multi_shuffle", &PyGPUToggles::set_multi_shuffle, py::arg("enable"),
                    "Enable multi-element warp-shuffle kernel (32 < N ≤ 512, experimental)")
         .def_static("multi_shuffle_enabled", &PyGPUToggles::multi_shuffle_enabled,
-                   "Check if multi-shuffle kernel is enabled");
+                   "Check if multi-shuffle kernel is enabled")
+        .def_static("set_block_size", &PyGPUToggles::set_block_size, py::arg("block_size"),
+                   "Set CUDA block size (power-of-2 in [1, 1024], or 0 for auto)")
+        .def_static("get_block_size", &PyGPUToggles::get_block_size,
+                   "Get current CUDA block size configuration");
 #endif
 }

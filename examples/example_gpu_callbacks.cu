@@ -41,6 +41,11 @@ __device__ void store_passthrough(int32_t* dest, int32_t value, size_t index, vo
     *dest = value;
 }
 
+__device__ fwht_load_fn_i32 d_preprocess_ptr = preprocess_xor;
+__device__ fwht_store_fn_i32 d_postprocess_ptr = postprocess_normalize;
+__device__ fwht_load_fn_i32 d_passthrough_ptr = load_passthrough;
+__device__ fwht_store_fn_i32 d_store_passthrough_ptr = store_passthrough;
+
 int main(void) {
     const size_t n = 256;
     const size_t batch_size = 4;
@@ -97,9 +102,8 @@ int main(void) {
     printf("Test 2: Transform with XOR preprocessing callback\n");
     
     /* Get device function pointer for preprocessing */
-    __device__ fwht_load_fn_i32 d_preprocess_ptr = preprocess_xor;
-    fwht_load_fn_i32 h_preprocess;
-    cudaMemcpyFromSymbol(&h_preprocess, d_preprocess_ptr, sizeof(void*));
+    fwht_load_fn_i32 h_preprocess = nullptr;
+    cudaMemcpyFromSymbol(&h_preprocess, d_preprocess_ptr, sizeof(fwht_load_fn_i32));
     
     /* Set up mask parameter on device */
     int32_t h_mask = 0xFFFFFFFF;  /* Flip all bits */
@@ -109,9 +113,9 @@ int main(void) {
     
     /* Set callbacks */
     status = fwht_gpu_context_set_callbacks_i32(ctx, 
-                                                  (void*)h_preprocess,
-                                                  NULL,  /* No postprocessing */
-                                                  d_mask);
+                                                h_preprocess,
+                                                NULL,  /* No postprocessing */
+                                                d_mask);
     if (status != FWHT_SUCCESS) {
         fprintf(stderr, "Failed to set callbacks: %s\n", fwht_error_string(status));
     } else {

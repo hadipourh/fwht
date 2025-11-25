@@ -27,6 +27,12 @@
 #include <stdlib.h>
 #include <math.h>
 
+static void print_binary(unsigned value, int bits) {
+    for (int i = bits - 1; i >= 0; --i) {
+        putchar((value & (1u << i)) ? '1' : '0');
+    }
+}
+
 int main(void) {
     printf("=================================================================\n");
     printf("FWHT Library - Basic Example\n");
@@ -71,6 +77,11 @@ int main(void) {
     
     uint8_t f[16] = {0,1,1,0,1,0,0,1,1,0,0,1,0,1,1,0};
     double correlations[16];
+    const size_t f_len = sizeof(f) / sizeof(f[0]);
+    int f_bits = 0;
+    while ((1u << f_bits) < f_len) {
+        f_bits++;
+    }
     
     status = fwht_correlations(f, correlations, 16);
     if (status != FWHT_SUCCESS) {
@@ -95,7 +106,9 @@ int main(void) {
     }
     
     printf("Best linear approximation:\n");
-    printf("  Mask u = %d (binary: %04b)\n", best_u, best_u);
+    printf("  Mask u = %d (binary: ", best_u);
+    print_binary((unsigned)best_u, f_bits);
+    printf(")\n");
     printf("  Correlation: %+.6f\n", best_corr);
     printf("  WHT coefficient: %+.1f\n", best_corr * 16.0);
     

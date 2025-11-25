@@ -34,13 +34,39 @@ extern "C" {
  * CUDA Backend Functions (implemented in fwht_cuda.cu)
  * ============================================================================ */
 
-#ifdef __NVCC__
-/* CUDA implementations */
+#ifdef USE_CUDA
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#endif
+#include <cuda_runtime_api.h>
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+
 fwht_status_t fwht_i32_cuda(int32_t* data, size_t n);
 fwht_status_t fwht_f64_cuda(double* data, size_t n);
 fwht_status_t fwht_batch_i32_cuda(int32_t* data, size_t n, size_t batch_size);
 fwht_status_t fwht_batch_f64_cuda(double* data, size_t n, size_t batch_size);
-#endif
+fwht_status_t fwht_batch_i32_cuda_device(int32_t* d_data, size_t n, size_t batch_size);
+fwht_status_t fwht_batch_i32_cuda_device_async(int32_t* d_data,
+											   size_t n,
+											   size_t batch_size,
+											   cudaStream_t stream);
+
+fwht_status_t fwht_cuda_lat_build_direct(const uint32_t* table,
+										 size_t size,
+										 const size_t* masks,
+										 size_t mask_count,
+										 int32_t* dst);
+fwht_status_t fwht_cuda_lat_build_device(const uint32_t* table,
+										 size_t size,
+										 const size_t* masks,
+										 size_t mask_count,
+										 int32_t* d_dst,
+										 cudaStream_t stream);
+void fwht_cuda_lat_direct_release_cache(void);
+#endif /* USE_CUDA */
 
 #ifdef __cplusplus
 }

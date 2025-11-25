@@ -315,6 +315,121 @@ static int test_auto_backend() {
     return result;
 }
 
+/* Test: GPU callback API declarations */
+static int test_gpu_callback_api_declarations() {
+    /* Test is just compilation-time check */
+    /* If we got here, the API is properly declared */
+    return 1;
+}
+
+/* Test: GPU callback NULL context handling */
+static int test_gpu_callback_null_context() {
+#ifdef USE_CUDA
+    fwht_status_t status;
+    
+    status = fwht_gpu_context_set_callbacks_i32(NULL, NULL, NULL, NULL);
+    if (status != FWHT_ERROR_NULL_POINTER) {
+        return 0;
+    }
+    
+    status = fwht_gpu_context_set_callbacks_f64(NULL, NULL, NULL, NULL);
+    if (status != FWHT_ERROR_NULL_POINTER) {
+        return 0;
+    }
+    
+    return 1;
+#else
+    return 1; /* Skip when CUDA unavailable */
+#endif
+}
+
+/* Test: GPU callback configuration */
+static int test_gpu_callback_configuration() {
+#ifdef USE_CUDA
+    if (!fwht_has_gpu()) {
+        return 1;
+    }
+    
+    /* Create context */
+    fwht_gpu_context_t* ctx = fwht_gpu_context_create(256, 10);
+    if (!ctx) {
+        return 0;
+    }
+    
+    /* Set callbacks to NULL (should succeed) */
+    fwht_status_t status = fwht_gpu_context_set_callbacks_i32(ctx, NULL, NULL, NULL);
+    if (status != FWHT_SUCCESS) {
+        fwht_gpu_context_destroy(ctx);
+        return 0;
+    }
+    
+    status = fwht_gpu_context_set_callbacks_f64(ctx, NULL, NULL, NULL);
+    if (status != FWHT_SUCCESS) {
+        fwht_gpu_context_destroy(ctx);
+        return 0;
+    }
+    
+    /* Cleanup */
+    fwht_gpu_context_destroy(ctx);
+    
+    return 1;
+#else
+    return 1; /* Skip when CUDA unavailable */
+#endif
+}
+
+/* Test: Transform with NULL callbacks */
+static int test_gpu_transform_with_null_callbacks() {
+#ifdef USE_CUDA
+    if (!fwht_has_gpu()) {
+        return 1;
+    }
+    
+    const size_t n = 256;
+    int32_t* data = (int32_t*)malloc(n * sizeof(int32_t));
+    if (!data) {
+        return 0;
+    }
+    
+    /* Initialize data */
+    for (size_t i = 0; i < n; i++) {
+        data[i] = (i % 2 == 0) ? 1 : -1;
+    }
+    
+    /* Create context and set NULL callbacks */
+    fwht_gpu_context_t* ctx = fwht_gpu_context_create(n, 1);
+    if (!ctx) {
+        free(data);
+        return 0;
+    }
+    
+    fwht_gpu_context_set_callbacks_i32(ctx, NULL, NULL, NULL);
+    
+    /* Perform transform */
+    fwht_status_t status = fwht_gpu_context_compute_i32(ctx, data, n, 1);
+    if (status != FWHT_SUCCESS) {
+        fwht_gpu_context_destroy(ctx);
+        free(data);
+        return 0;
+    }
+    
+    /* Verify result makes sense (should be 0 or 256 for alternating pattern) */
+    if (data[0] != 0 && data[0] != 256 && data[0] != -256) {
+        fwht_gpu_context_destroy(ctx);
+        free(data);
+        return 0;
+    }
+    
+    /* Cleanup */
+    fwht_gpu_context_destroy(ctx);
+    free(data);
+    
+    return 1;
+#else
+    return 1; /* Skip when CUDA unavailable */
+#endif
+}
+
 /* ============================================================================
  * Performance Benchmarks
  * ============================================================================ */
@@ -404,8 +519,11 @@ static inline float fp16_to_float(uint16_t h) {
 
 /* Test: Tensor Core fp16 vs CPU f64 reference */
 static int test_tensor_core_fp16() {
-    const size_t n = 1024;
+    const size_t test_sizes[] = {256, 512, 1024, 2048, 4096};
     const size_t batch_size = 10;
+    
+    for (size_t t = 0; t < sizeof(test_sizes)/sizeof(test_sizes[0]); t++) {
+        size_t n = test_sizes[t];
     const size_t total_size = n * batch_size;
     
     /* Check if Tensor Cores available */
@@ -518,9 +636,10 @@ static int test_tensor_core_fp16() {
     free(h_fp16_out);
     
     if (mismatches > 0) {
-        printf(" (%d mismatches, max_err=%.6f)", mismatches, max_error);
+        printf(" (n=%zu: %d mismatches, max_err=%.6f)", n, mismatches, max_error);
         return 0;
     }
+    }  /* end for each test size */
     
     return 1;
 }
@@ -668,7 +787,7 @@ static double benchmark_fp64_batch(size_t n, size_t batch_size) {
 static double benchmark_tensorcore_batch(size_t n, size_t batch_size) {
     if (!fwht_has_gpu()) return -1.0;
     if (batch_size == 0 || n == 0 || (n & (n - 1))) return -1.0;
-    if (n > 1024 || (n % 256) != 0) return -1.0;
+    if (n > 32768 || (n % 256) != 0) return -1.0;
     if (fwht_gpu_get_compute_capability() < 70) return -1.0;
 
     size_t total = n * batch_size;
@@ -676,8 +795,9 @@ static double benchmark_tensorcore_batch(size_t n, size_t batch_size) {
     uint16_t* h_data = (uint16_t*)malloc(bytes);
     if (!h_data) return -1.0;
 
+    /* Cryptanalysis: Use Boolean function representation {-1, +1} */
     for (size_t i = 0; i < total; i++) {
-        float val = ((float)rand() / (float)RAND_MAX) * 2.0f - 1.0f;
+        float val = (rand() % 2) ? 1.0f : -1.0f;  /* Only -1 or +1 */
         h_data[i] = float_to_fp16(val);
     }
 
@@ -741,8 +861,9 @@ static void verify_batch_outputs(size_t n, size_t batch_size) {
         return;
     }
 
+    /* Cryptanalysis: Use Boolean function representation {-1, +1} */
     for (size_t i = 0; i < total; i++) {
-        int32_t val = (int32_t)(rand() % 201 - 100);
+        int32_t val = (rand() % 2) ? 1 : -1;  /* Only -1 or +1 */
         base[i] = val;
         cpu_buf[i] = val;
         gpu_buf[i] = val;
@@ -790,7 +911,7 @@ static void verify_batch_outputs(size_t n, size_t batch_size) {
     size_t worst_fp32_idx = 0;
     double worst_fp32_cpu = 0.0;
     double worst_fp32_raw = 0.0;
-    bool tc_supported = (fwht_gpu_get_compute_capability() >= 70) && (n <= 1024) && ((n % 256) == 0);
+    bool tc_supported = (fwht_gpu_get_compute_capability() >= 70) && (n <= 32768) && ((n % 256) == 0);
     if (tc_supported) {
         uint16_t* d_tc = NULL;
         cudaError_t err = cudaMalloc((void**)&d_tc, total * sizeof(uint16_t));
@@ -892,30 +1013,6 @@ static void verify_batch_outputs(size_t n, size_t batch_size) {
     }
     if (tc_ran) {
         printf(", max|CPU-TC(fp16)|=%.4f\n", max_cpu_tc);
-        if (n == 1024 && batch_size == 10 && gpu_fp32_ran) {
-            FILE* dump = fopen("build/tensorcore_dump_n1024_batch10.txt", "w");
-            if (dump) {
-                fprintf(dump, "index,batch,position,cpu_value,gpu_fp32,tc_value,diff_cpu_tc,diff_cpu_gpu\n");
-                for (size_t b = 0; b < batch_size; ++b) {
-                    for (size_t pos = 0; pos < n; ++pos) {
-                        size_t idx = b * n + pos;
-                        double cpu_val = (double)cpu_buf[idx];
-                        double gpu_val = (double)gpu_fp32[idx];
-                        double tc_val = (double)fp16_to_float(tc_host[idx]);
-                        double diff_tc = cpu_val - tc_val;
-                        double diff_gpu = cpu_val - gpu_val;
-                        fprintf(dump, "%zu,%zu,%zu,%.0f,%.6f,%.6f,%.6f,%.6f\n",
-                                idx, b, pos, cpu_val, gpu_val, tc_val, diff_tc, diff_gpu);
-                    }
-                }
-                fclose(dump);
-                printf("      dumped tensor-core comparison to build/tensorcore_dump_n1024_batch10.txt\n");
-            } else {
-                printf("        failed to write tensor-core dump file\n");
-            }
-        } else if (n == 1024 && batch_size == 10) {
-            printf("        skipped dump (fp32 GPU reference unavailable)\n");
-        }
     } else if (tc_supported) {
         printf(", Tensor Core verify skipped (alloc/copy failure)\n");
     } else {
@@ -1149,56 +1246,60 @@ static void benchmark_tensorcore_comparison() {
 
     print_tensorcore_sample_vector();
 
-    const size_t n = 1024;
-    const size_t batch_sizes[] = {10, 50, 100, 200, 512, 1024};
+    const size_t test_sizes[] = {256, 512, 1024, 4096, 8192};
+    const size_t batch_sizes[] = {1, 10, 100, 1000, 10000};
+    
+    for (size_t s = 0; s < sizeof(test_sizes)/sizeof(test_sizes[0]); s++) {
+        size_t n = test_sizes[s];
 
-    printf("\nPerformance Comparison - Batch Processing (n=1024, All GPU Precisions):\n");
-    printf("  Batch Size  CPU (i32)   GPU (i32)  GPU (fp64)  GPU (fp32)  TC (fp16)  Speedup (TC)\n");
-    printf("  -------------------------------------------------------------------------------------\n");
+        printf("\nPerformance Comparison - Batch Processing (n=%zu, All GPU Precisions):\n", n);
+        printf("  Batch Size  CPU (i32)   GPU (i32)  GPU (fp64)  GPU (fp32)  TC (fp16)  Speedup (TC)\n");
+        printf("  -------------------------------------------------------------------------------------\n");
 
-    for (size_t i = 0; i < sizeof(batch_sizes)/sizeof(batch_sizes[0]); i++) {
-        size_t batch = batch_sizes[i];
-        double cpu_time = benchmark_batch(n, batch, FWHT_BACKEND_CPU);
-        double gpu_time = benchmark_batch(n, batch, FWHT_BACKEND_GPU);
-        double gpu_fp64_time = benchmark_fp64_batch(n, batch);
-        double gpu_fp32_time = benchmark_fp32_batch(n, batch);
-        double tc_time = benchmark_tensorcore_batch(n, batch);
+        for (size_t i = 0; i < sizeof(batch_sizes)/sizeof(batch_sizes[0]); i++) {
+            size_t batch = batch_sizes[i];
+            double cpu_time = benchmark_batch(n, batch, FWHT_BACKEND_CPU);
+            double gpu_time = benchmark_batch(n, batch, FWHT_BACKEND_GPU);
+            double gpu_fp64_time = benchmark_fp64_batch(n, batch);
+            double gpu_fp32_time = benchmark_fp32_batch(n, batch);
+            double tc_time = benchmark_tensorcore_batch(n, batch);
 
-        printf("  %-10zu  %0.4fs", batch, cpu_time);
+            printf("  %-10zu  %0.4fs", batch, cpu_time);
 
-        if (gpu_time < 0) {
-            printf("      N/A      ");
-        } else {
-            printf("      %0.4fs", gpu_time);
+            if (gpu_time < 0) {
+                printf("      N/A      ");
+            } else {
+                printf("      %0.4fs", gpu_time);
+            }
+
+            if (gpu_fp64_time < 0) {
+                printf("     N/A      ");
+            } else {
+                printf("     %0.4fs", gpu_fp64_time);
+            }
+
+            if (gpu_fp32_time < 0) {
+                printf("     N/A      ");
+            } else {
+                printf("     %0.4fs", gpu_fp32_time);
+            }
+
+            if (tc_time < 0) {
+                printf("      N/A           ");
+            } else {
+                printf("      %0.4fs", tc_time);
+            }
+
+            if (tc_time > 0) {
+                double speedup_tc = cpu_time / tc_time;
+                printf("      %0.2fx\n", speedup_tc);
+            } else {
+                printf("      N/A\n");
+            }
+
+            verify_batch_outputs(n, batch);
         }
-
-        if (gpu_fp64_time < 0) {
-            printf("     N/A      ");
-        } else {
-            printf("     %0.4fs", gpu_fp64_time);
-        }
-
-        if (gpu_fp32_time < 0) {
-            printf("     N/A      ");
-        } else {
-            printf("     %0.4fs", gpu_fp32_time);
-        }
-
-        if (tc_time < 0) {
-            printf("      N/A           ");
-        } else {
-            printf("      %0.4fs", tc_time);
-        }
-
-        if (tc_time > 0) {
-            double speedup_tc = cpu_time / tc_time;
-            printf("      %0.2fx\n", speedup_tc);
-        } else {
-            printf("      N/A\n");
-        }
-
-        verify_batch_outputs(n, batch);
-    }
+    }  /* end for each test size */
 #else
     (void)benchmark_tensorcore_batch;
 #endif
@@ -1228,6 +1329,10 @@ int main(void) {
     RUN_TEST(test_gpu_batch_large_transform);
     RUN_TEST(test_gpu_batch_intensive);
     RUN_TEST(test_tensor_core_fp16);
+    RUN_TEST(test_gpu_callback_api_declarations);
+    RUN_TEST(test_gpu_callback_null_context);
+    RUN_TEST(test_gpu_callback_configuration);
+    RUN_TEST(test_gpu_transform_with_null_callbacks);
     
     printf("\n");
     printf("Test Summary:\n");

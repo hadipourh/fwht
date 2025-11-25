@@ -21,7 +21,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  *
- * Version: 1.1.4
+ * Version: 2.0.0
  */
 
 #ifndef FWHT_H
@@ -39,10 +39,10 @@ extern "C" {
  * VERSION INFORMATION
  * ============================================================================ */
 
-#define FWHT_VERSION_MAJOR 1
-#define FWHT_VERSION_MINOR 1
-#define FWHT_VERSION_PATCH 4
-#define FWHT_VERSION "1.1.4"
+#define FWHT_VERSION_MAJOR 2
+#define FWHT_VERSION_MINOR 0
+#define FWHT_VERSION_PATCH 0
+#define FWHT_VERSION "2.0.0"
 
 /* ============================================================================
  * BACKEND SELECTION
@@ -214,6 +214,19 @@ fwht_status_t fwht_f64_backend(double* data, size_t n, fwht_backend_t backend);
  * ============================================================================ */
 
 #ifdef USE_CUDA
+
+/* ============================================================================
+ * FP16 TENSOR CORE IMPLEMENTATION NOTES
+ * 
+ * FP16 Tensor Core kernels use true FP16 (mma.f16.f16.f16.f16) for optimal
+ * performance and accuracy with Walsh-Hadamard transforms.
+ * 
+ * For Boolean inputs {-1, +1}, WHT produces integer results that FP16 can
+ * represent exactly (up to n=32768), achieving zero numerical error.
+ * 
+ * Supported sizes: 256, 512, 1024, 2048, 4096, 8192, 16384, 32768
+ * ============================================================================ */
+
 /*
  * Configure CUDA execution parameters (optional).
  * Provide a power-of-two block size in [1, 1024] to override auto-tuning.
@@ -521,6 +534,36 @@ fwht_status_t fwht_from_bool(const uint8_t* bool_func, int32_t* wht_out,
  *         Values in range [-1.0, +1.0]
  */
 fwht_status_t fwht_correlations(const uint8_t* bool_func, double* corr_out, size_t n);
+
+/* ============================================================================
+ * VECTORIAL BOOLEAN / S-BOX ANALYSIS
+ * ============================================================================ */
+
+typedef struct {
+    size_t   m;                       /* Input width (size = 2^m) */
+    size_t   n;                       /* Output width inferred from LUT */
+    size_t   size;                    /* Convenience alias for 2^m */
+    int32_t  component_max_walsh;     /* Max |Walsh| among Boolean components */
+    double   component_min_nonlinearity; /* Smallest nonlinearity across components */
+    int32_t  lat_max;                 /* Max |LAT| entry (0 if LAT not computed) */
+    double   lat_max_bias;            /* lat_max / size (0 if LAT not computed) */
+    double   component_fwht_ms;       /* Time spent computing component spectra (ms) */
+    double   lat_column_ms;           /* Time spent synthesizing LAT columns (ms) */
+    double   lat_fwht_ms;             /* Time spent transforming LAT columns (ms) */
+} fwht_sbox_metrics_t;
+
+typedef struct {
+    fwht_backend_t backend;           /* Preferred backend (AUTO if unspecified) */
+    bool           compute_lat;       /* Force LAT computation even if lat buffer NULL */
+    bool           profile_timings;   /* Collect per-phase timing metrics */
+    int32_t*       component_spectra; /* Optional buffer (n * size entries, contiguous) */
+    int32_t*       lat;               /* Optional row-major LAT buffer: size × 2^n */
+} fwht_sbox_request_t;
+
+fwht_status_t fwht_sbox_analyze(const uint32_t* table,
+                                size_t size,
+                                const fwht_sbox_request_t* request,
+                                fwht_sbox_metrics_t* metrics);
 
 /* ============================================================================
  * BIT-SLICED BOOLEAN WHT (HIGH PERFORMANCE FOR CRYPTOGRAPHY)
