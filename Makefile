@@ -250,6 +250,15 @@ else
 endif
 	@echo "Run with: ./build/fwht_bench [options]"
 
+.PHONY: sbox-bench
+sbox-bench: directories lib $(BUILD_DIR)/bench_sbox_lat
+	@echo "Running S-box LAT benchmark"
+	$(BUILD_DIR)/bench_sbox_lat
+
+$(BUILD_DIR)/bench_sbox_lat: $(TEST_DIR)/bench_sbox_lat.c $(STATIC_LIB)
+	@echo "Building S-box LAT benchmark: $@"
+	$(CC) $(CFLAGS) $< -L$(LIB_DIR) -lfwht $(CUDA_LDFLAGS) $(LDFLAGS) -lm -o $@ -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
+
 # Build example programs
 examples: directories lib $(EXAMPLE_TARGETS)
 	@echo "Example binaries available in $(EXAMPLES_DIR)/"
@@ -396,6 +405,7 @@ help:
 	@echo "  shared    - Build shared library only"
 	@echo "  test      - Build and run test suite"
 	@echo "  cli       - Build the fwht_cli command-line tool"
+	@echo "  sbox-bench - Generate random S-boxes and benchmark LAT"
 	@echo "  examples  - Build example programs under $(EXAMPLES_DIR)/"
 	@echo "  clean     - Remove build artifacts"
 	@echo "  install   - Install library to /usr/local (requires sudo)"
