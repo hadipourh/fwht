@@ -411,39 +411,21 @@ static void fwht_lat_build_from_table(const uint32_t* table,
     }
 }
 
-static double fwht_now_seconds(void) {
-#if defined(_WIN32)
-    LARGE_INTEGER freq;
-    LARGE_INTEGER counter;
-    QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&counter);
-    return (double)counter.QuadPart / (double)freq.QuadPart;
-#else
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
-#endif
-}
+typedef struct {
+    size_t size;
+    size_t m;
+    size_t n;
+} fwht_sbox_shape_t;
 
-fwht_status_t fwht_sbox_analyze(const uint32_t* table,
-                                size_t size,
-                                const fwht_sbox_request_t* request,
-                                fwht_sbox_metrics_t* metrics) {
-    if (table == NULL || metrics == NULL) {
+static fwht_status_t fwht_sbox_resolve_shape(const uint32_t* table,
+                                             size_t size,
+                                             fwht_sbox_shape_t* shape) {
+    if (table == NULL || shape == NULL) {
         return FWHT_ERROR_NULL_POINTER;
     }
     if (size == 0 || !fwht_is_power_of_2(size)) {
         return FWHT_ERROR_INVALID_SIZE;
     }
-
-    fwht_backend_t backend = (request != NULL) ? request->backend : FWHT_BACKEND_AUTO;
-    if (backend < FWHT_BACKEND_AUTO || backend > FWHT_BACKEND_GPU) {
-        backend = FWHT_BACKEND_AUTO;
-    }
-
-    fwht_sbox_metrics_t tmp_metrics = {0};
-    tmp_metrics.size = size;
-    tmp_metrics.m = (size_t)fwht_log2(size);
 
     uint32_t max_value = 0;
     for (size_t i = 0; i < size; ++i) {
@@ -458,70 +440,88 @@ fwht_status_t fwht_sbox_analyze(const uint32_t* table,
 
     size_t component_count = fwht_bit_length_u32(max_value);
     if (component_count == 0) {
-        component_count = 1;  /* Treat constant-zero S-box as 1-bit output */
+        component_count = 1;
     }
     if (component_count > (size_t)INT_MAX) {
         return FWHT_ERROR_INVALID_ARGUMENT;
     }
 
-    tmp_metrics.n = component_count;
+    shape->size = size;
+    shape->m = (size_t)fwht_log2(size);
+    shape->n = component_count;
+    return FWHT_SUCCESS;
+}
 
-    const bool need_lat_buffer = (request != NULL && request->lat != NULL);
-    const bool force_lat = (request != NULL && request->compute_lat);
-    const bool compute_lat = need_lat_buffer || force_lat;
+static double fwht_now_seconds(void) {
+#if defined(_WIN32)
+    LARGE_INTEGER freq;
+    LARGE_INTEGER counter;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&counter);
+    return (double)counter.QuadPart / (double)freq.QuadPart;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+#endif
+}
+
+fwht_status_t fwht_sbox_analyze_components(const uint32_t* table,
+                                            size_t size,
+                                            const fwht_sbox_component_request_t* request,
+                                            fwht_sbox_component_metrics_t* metrics) {
+    if (metrics == NULL) {
+        return FWHT_ERROR_NULL_POINTER;
+    }
+
+    fwht_sbox_shape_t shape;
+    fwht_status_t status = fwht_sbox_resolve_shape(table, size, &shape);
+    if (status != FWHT_SUCCESS) {
+        return status;
+    }
+
+    fwht_sbox_component_metrics_t tmp = {0};
+    tmp.size = shape.size;
+    tmp.m = shape.m;
+    tmp.n = shape.n;
+
+    fwht_backend_t backend = (request != NULL) ? request->backend : FWHT_BACKEND_AUTO;
+    if (backend < FWHT_BACKEND_AUTO || backend > FWHT_BACKEND_GPU) {
+        backend = FWHT_BACKEND_AUTO;
+    }
     const bool profile_timings = (request != NULL && request->profile_timings);
 #ifdef USE_CUDA
     const bool prefer_gpu_backend = (backend == FWHT_BACKEND_GPU);
-    bool lat_use_gpu_columns = prefer_gpu_backend;
 #else
     const bool prefer_gpu_backend = false;
 #endif
+    const bool require_context = (!prefer_gpu_backend && backend != FWHT_BACKEND_AUTO);
 
-    double component_fwht_seconds = 0.0;
-    double lat_column_seconds = 0.0;
-    double lat_fwht_seconds = 0.0;
-
-    size_t component_total;
-    if (component_count != 0 && size > SIZE_MAX / component_count) {
+    size_t component_count = shape.n;
+    if (component_count != 0 && shape.size > SIZE_MAX / component_count) {
         return FWHT_ERROR_INVALID_ARGUMENT;
     }
-    component_total = component_count * size;
+    size_t component_total = component_count * shape.size;
     if (component_total > SIZE_MAX / sizeof(int32_t)) {
         return FWHT_ERROR_INVALID_ARGUMENT;
     }
 
     int32_t* component_data = NULL;
-    bool component_owned = true;
-    if (request != NULL && request->component_spectra != NULL) {
-        component_data = request->component_spectra;
-        component_owned = false;
+    bool component_owned = false;
+    if (request != NULL && request->spectra != NULL) {
+        component_data = request->spectra;
     } else {
         component_data = (int32_t*)malloc(component_total * sizeof(int32_t));
         if (component_data == NULL) {
             return FWHT_ERROR_OUT_OF_MEMORY;
         }
-    }
-
-    int8_t* sign_matrix = (int8_t*)malloc(component_total * sizeof(int8_t));
-    if (sign_matrix == NULL) {
-        if (component_owned) {
-            free(component_data);
-        }
-        return FWHT_ERROR_OUT_OF_MEMORY;
+        component_owned = true;
     }
 
     for (size_t bit = 0; bit < component_count; ++bit) {
-        int8_t* row = sign_matrix + bit * size;
-        for (size_t i = 0; i < size; ++i) {
+        int32_t* row = component_data + bit * shape.size;
+        for (size_t i = 0; i < shape.size; ++i) {
             row[i] = ((table[i] >> bit) & 1u) ? -1 : 1;
-        }
-    }
-
-    for (size_t bit = 0; bit < component_count; ++bit) {
-        int32_t* dst = component_data + bit * size;
-        const int8_t* src = sign_matrix + bit * size;
-        for (size_t i = 0; i < size; ++i) {
-            dst[i] = (int32_t)src[i];
         }
     }
 
@@ -530,21 +530,19 @@ fwht_status_t fwht_sbox_analyze(const uint32_t* table,
         if (component_owned) {
             free(component_data);
         }
-        free(sign_matrix);
         return FWHT_ERROR_OUT_OF_MEMORY;
     }
     for (size_t bit = 0; bit < component_count; ++bit) {
-        component_ptrs[bit] = component_data + bit * size;
+        component_ptrs[bit] = component_data + bit * shape.size;
     }
 
     fwht_context_t* ctx = NULL;
-    if (!prefer_gpu_backend && backend != FWHT_BACKEND_AUTO) {
+    if (require_context) {
         fwht_config_t cfg = fwht_default_config();
         cfg.backend = backend;
         ctx = fwht_create_context(&cfg);
         if (ctx == NULL) {
             free(component_ptrs);
-            free(sign_matrix);
             if (component_owned) {
                 free(component_data);
             }
@@ -552,11 +550,11 @@ fwht_status_t fwht_sbox_analyze(const uint32_t* table,
         }
     }
 
-    fwht_status_t status;
+    double component_fwht_seconds = 0.0;
 #ifdef USE_CUDA
     if (prefer_gpu_backend) {
         status = fwht_sbox_gpu_transform_components(component_data,
-                                                    size,
+                                                    shape.size,
                                                     component_count,
                                                     &component_fwht_seconds,
                                                     profile_timings);
@@ -564,15 +562,17 @@ fwht_status_t fwht_sbox_analyze(const uint32_t* table,
 #endif
     {
         double component_start = profile_timings ? fwht_now_seconds() : 0.0;
-        status = fwht_batch_i32(ctx, component_ptrs, size, (int)component_count);
+        status = fwht_batch_i32(ctx, component_ptrs, shape.size, (int)component_count);
         if (profile_timings) {
             component_fwht_seconds += fwht_now_seconds() - component_start;
         }
     }
+
     if (status != FWHT_SUCCESS) {
-        if (ctx) fwht_destroy_context(ctx);
+        if (ctx) {
+            fwht_destroy_context(ctx);
+        }
         free(component_ptrs);
-        free(sign_matrix);
         if (component_owned) {
             free(component_data);
         }
@@ -580,11 +580,11 @@ fwht_status_t fwht_sbox_analyze(const uint32_t* table,
     }
 
     int32_t global_max_walsh = 0;
-    double min_nonlinearity = (double)size * 0.5;
+    double min_nonlinearity = (double)shape.size * 0.5;
     for (size_t bit = 0; bit < component_count; ++bit) {
         int32_t bit_max = 0;
-        int32_t* spectrum = component_data + bit * size;
-        for (size_t i = 0; i < size; ++i) {
+        int32_t* spectrum = component_data + bit * shape.size;
+        for (size_t i = 0; i < shape.size; ++i) {
             int32_t abs_val = fwht_i32_abs(spectrum[i]);
             if (abs_val > bit_max) {
                 bit_max = abs_val;
@@ -593,282 +593,274 @@ fwht_status_t fwht_sbox_analyze(const uint32_t* table,
         if (bit_max > global_max_walsh) {
             global_max_walsh = bit_max;
         }
-        double bit_nl = (double)size * 0.5 - 0.5 * (double)bit_max;
+        double bit_nl = (double)shape.size * 0.5 - 0.5 * (double)bit_max;
         if (bit_nl < min_nonlinearity) {
             min_nonlinearity = bit_nl;
         }
     }
 
-    tmp_metrics.component_max_walsh = global_max_walsh;
-    tmp_metrics.component_min_nonlinearity = (component_count > 0) ? min_nonlinearity : 0.0;
-
-    int32_t lat_max_abs = 0;
-    int32_t** lat_batch_ptrs = NULL;
-    int32_t* lat_batch_buffer = NULL;
-
-    if (compute_lat) {
-        if (component_count >= (size_t)(sizeof(size_t) * CHAR_BIT)) {
-            if (ctx) fwht_destroy_context(ctx);
-            free(component_ptrs);
-            free(sign_matrix);
-            if (component_owned) {
-                free(component_data);
-            }
-            return FWHT_ERROR_INVALID_ARGUMENT;
-        }
-        size_t lat_cols = (size_t)1 << component_count;
-        if (lat_cols == 0) {
-            if (ctx) fwht_destroy_context(ctx);
-            free(component_ptrs);
-            free(sign_matrix);
-            if (component_owned) {
-                free(component_data);
-            }
-            return FWHT_ERROR_INVALID_ARGUMENT;
-        }
-        if (need_lat_buffer) {
-            if (lat_cols != 0 && size > SIZE_MAX / lat_cols) {
-                if (ctx) fwht_destroy_context(ctx);
-                free(component_ptrs);
-                free(sign_matrix);
-                if (component_owned) {
-                    free(component_data);
-                }
-                return FWHT_ERROR_INVALID_ARGUMENT;
-            }
-        }
-
-        size_t lat_batch_capacity;
-        if (prefer_gpu_backend) {
-            const size_t gpu_batch_hint = 256;          /* default when memory allows */
-            const size_t gpu_batch_cap = 1024;          /* hard ceiling to limit launch size */
-            const size_t gpu_batch_target_bytes = 64ull * 1024ull * 1024ull; /* ~64 MiB */
-            lat_batch_capacity = gpu_batch_hint;
-            size_t bytes_per_column;
-            if (size > SIZE_MAX / sizeof(int32_t)) {
-                bytes_per_column = SIZE_MAX;
-            } else {
-                bytes_per_column = size * sizeof(int32_t);
-            }
-            if (bytes_per_column != 0) {
-                size_t bytes_limit = gpu_batch_target_bytes / bytes_per_column;
-                if (bytes_limit == 0) {
-                    bytes_limit = 1;
-                }
-                if (bytes_limit < lat_batch_capacity) {
-                    lat_batch_capacity = bytes_limit;
-                }
-            }
-            if (lat_batch_capacity > gpu_batch_cap) {
-                lat_batch_capacity = gpu_batch_cap;
-            }
-        } else {
-            lat_batch_capacity = 8;
-        }
-        if (lat_batch_capacity == 0) {
-            lat_batch_capacity = 1;
-        }
-        if (lat_batch_capacity > lat_cols) {
-            lat_batch_capacity = lat_cols;
-        }
-        if (lat_batch_capacity > (size_t)INT_MAX) {
-            lat_batch_capacity = (size_t)INT_MAX;
-        }
-
-        if (size > 0 && lat_batch_capacity > SIZE_MAX / size) {
-            if (ctx) fwht_destroy_context(ctx);
-            free(component_ptrs);
-            free(sign_matrix);
-            if (component_owned) {
-                free(component_data);
-            }
-            return FWHT_ERROR_INVALID_ARGUMENT;
-        }
-
-        lat_batch_buffer = (int32_t*)malloc(lat_batch_capacity * size * sizeof(int32_t));
-        lat_batch_ptrs = (int32_t**)malloc(lat_batch_capacity * sizeof(int32_t*));
-#ifdef USE_CUDA
-        size_t* lat_mask_list = NULL;
-        if (lat_use_gpu_columns) {
-            lat_mask_list = (size_t*)malloc(lat_batch_capacity * sizeof(size_t));
-            if (lat_mask_list == NULL) {
-                lat_use_gpu_columns = false;
-            }
-        }
-#endif
-        if (lat_batch_buffer == NULL || lat_batch_ptrs == NULL) {
-#ifdef USE_CUDA
-            if (lat_mask_list) free(lat_mask_list);
-#endif
-            if (lat_batch_buffer) free(lat_batch_buffer);
-            if (lat_batch_ptrs) free(lat_batch_ptrs);
-            if (ctx) fwht_destroy_context(ctx);
-            free(component_ptrs);
-            free(sign_matrix);
-            if (component_owned) {
-                free(component_data);
-            }
-            return FWHT_ERROR_OUT_OF_MEMORY;
-        }
-
-        for (size_t i = 0; i < lat_batch_capacity; ++i) {
-            lat_batch_ptrs[i] = lat_batch_buffer + i * size;
-        }
-
-#ifdef USE_CUDA
-        bool lat_buffer_pinned = false;
-        if (lat_use_gpu_columns) {
-            size_t host_bytes = lat_batch_capacity * size * sizeof(int32_t);
-            if (cudaHostRegister(lat_batch_buffer, host_bytes, cudaHostRegisterPortable) == cudaSuccess) {
-                lat_buffer_pinned = true;
-            }
-            fwht_status_t ws_status = fwht_sbox_gpu_workspace_init();
-            if (ws_status != FWHT_SUCCESS ||
-                fwht_sbox_gpu_reserve_lat_buffer(size, lat_batch_capacity) != FWHT_SUCCESS) {
-                lat_use_gpu_columns = false;
-                if (lat_buffer_pinned) {
-                    cudaHostUnregister(lat_batch_buffer);
-                    lat_buffer_pinned = false;
-                }
-            }
-        }
-#endif
-
-        int32_t* lat_output = (request != NULL) ? request->lat : NULL;
-        const size_t lat_stride = lat_cols;
-
-        for (size_t base = 0; base < lat_cols; base += lat_batch_capacity) {
-            size_t current = lat_batch_capacity;
-            if (base + current > lat_cols) {
-                current = lat_cols - base;
-            }
-
-            bool combined_on_gpu = false;
-#ifdef USE_CUDA
-            if (lat_use_gpu_columns) {
-                for (size_t col = 0; col < current; ++col) {
-                    lat_mask_list[col] = base + col;
-                }
-                fwht_status_t gpu_status = fwht_sbox_gpu_process_lat_batch(table,
-                                                                            size,
-                                                                            lat_mask_list,
-                                                                            current,
-                                                                            lat_batch_buffer,
-                                                                            profile_timings ? &lat_column_seconds : NULL,
-                                                                            profile_timings ? &lat_fwht_seconds : NULL,
-                                                                            profile_timings);
-                if (gpu_status == FWHT_SUCCESS) {
-                    combined_on_gpu = true;
-                } else if (gpu_status == FWHT_ERROR_BACKEND_UNAVAILABLE) {
-                    lat_use_gpu_columns = false;
-                } else {
-                    if (lat_buffer_pinned) {
-                        cudaHostUnregister(lat_batch_buffer);
-                        lat_buffer_pinned = false;
-                    }
-                    if (lat_mask_list) free(lat_mask_list);
-                    free(lat_batch_ptrs);
-                    free(lat_batch_buffer);
-                    if (ctx) fwht_destroy_context(ctx);
-                    free(component_ptrs);
-                    free(sign_matrix);
-                    if (component_owned) {
-                        free(component_data);
-                    }
-                    return gpu_status;
-                }
-            }
-#endif
-            if (!combined_on_gpu) {
-                double combine_start = profile_timings ? fwht_now_seconds() : 0.0;
-#if defined(_OPENMP)
-#pragma omp parallel for schedule(static)
-#endif
-                for (size_t col = 0; col < current; ++col) {
-                    size_t mask = base + col;
-                    int32_t* dst = lat_batch_ptrs[col];
-                    fwht_lat_build_from_table(table, size, mask, dst);
-                }
-                if (profile_timings) {
-                    lat_column_seconds += fwht_now_seconds() - combine_start;
-                }
-
-                double lat_fwht_start = profile_timings ? fwht_now_seconds() : 0.0;
-                fwht_status_t lat_status = fwht_batch_i32(ctx, lat_batch_ptrs, size, (int)current);
-                if (profile_timings) {
-                    lat_fwht_seconds += fwht_now_seconds() - lat_fwht_start;
-                }
-                if (lat_status != FWHT_SUCCESS) {
-                    free(lat_batch_ptrs);
-                    free(lat_batch_buffer);
-#ifdef USE_CUDA
-                    if (lat_mask_list) {
-                        free(lat_mask_list);
-                    }
-                    if (lat_buffer_pinned) {
-                        cudaHostUnregister(lat_batch_buffer);
-                        lat_buffer_pinned = false;
-                    }
-#endif
-                    if (ctx) fwht_destroy_context(ctx);
-                    free(component_ptrs);
-                    free(sign_matrix);
-                    if (component_owned) {
-                        free(component_data);
-                    }
-                    return lat_status;
-                }
-            }
-
-            for (size_t col = 0; col < current; ++col) {
-                size_t mask = base + col;
-                int32_t* column_data = lat_batch_ptrs[col];
-                for (size_t row = 0; row < size; ++row) {
-                    int32_t value = column_data[row];
-                    int32_t abs_val = fwht_i32_abs(value);
-                    if (abs_val > lat_max_abs) {
-                        lat_max_abs = abs_val;
-                    }
-                    if (lat_output != NULL) {
-                        lat_output[row * lat_stride + mask] = value;
-                    }
-                }
-            }
-        }
-#ifdef USE_CUDA
-        if (lat_mask_list) {
-            free(lat_mask_list);
-        }
-        if (lat_buffer_pinned) {
-            cudaHostUnregister(lat_batch_buffer);
-        }
-#endif
-        free(lat_batch_ptrs);
-        free(lat_batch_buffer);
-
-        tmp_metrics.lat_max = lat_max_abs;
-        tmp_metrics.lat_max_bias = (lat_max_abs > 0) ? ((double)lat_max_abs / (double)size) : 0.0;
-    }
-
-    tmp_metrics.component_fwht_ms = component_fwht_seconds * 1000.0;
-    tmp_metrics.lat_column_ms = lat_column_seconds * 1000.0;
-    tmp_metrics.lat_fwht_ms = lat_fwht_seconds * 1000.0;
-
-    if (!profile_timings) {
-        tmp_metrics.component_fwht_ms = 0.0;
-        tmp_metrics.lat_column_ms = 0.0;
-        tmp_metrics.lat_fwht_ms = 0.0;
-    }
+    tmp.max_walsh = global_max_walsh;
+    tmp.min_nonlinearity = (component_count > 0) ? min_nonlinearity : 0.0;
+    tmp.fwht_ms = profile_timings ? component_fwht_seconds * 1000.0 : 0.0;
 
     if (ctx) {
         fwht_destroy_context(ctx);
     }
     free(component_ptrs);
-    free(sign_matrix);
     if (component_owned) {
         free(component_data);
     }
 
-    *metrics = tmp_metrics;
+    *metrics = tmp;
     return FWHT_SUCCESS;
+}
+
+fwht_status_t fwht_sbox_analyze_lat(const uint32_t* table,
+                                     size_t size,
+                                     const fwht_sbox_lat_request_t* request,
+                                     fwht_sbox_lat_metrics_t* metrics) {
+    if (metrics == NULL) {
+        return FWHT_ERROR_NULL_POINTER;
+    }
+
+    fwht_sbox_shape_t shape;
+    fwht_status_t status = fwht_sbox_resolve_shape(table, size, &shape);
+    if (status != FWHT_SUCCESS) {
+        return status;
+    }
+
+    fwht_sbox_lat_metrics_t tmp = {0};
+    tmp.size = shape.size;
+    tmp.m = shape.m;
+    tmp.n = shape.n;
+
+    const size_t bit_capacity = sizeof(size_t) * CHAR_BIT;
+    if (shape.n >= bit_capacity) {
+        return FWHT_ERROR_INVALID_ARGUMENT;
+    }
+    size_t lat_cols = (size_t)1 << shape.n;
+    if (lat_cols == 0) {
+        return FWHT_ERROR_INVALID_ARGUMENT;
+    }
+
+    fwht_backend_t backend = (request != NULL) ? request->backend : FWHT_BACKEND_AUTO;
+    if (backend < FWHT_BACKEND_AUTO || backend > FWHT_BACKEND_GPU) {
+        backend = FWHT_BACKEND_AUTO;
+    }
+    const bool profile_timings = (request != NULL && request->profile_timings);
+    int32_t* lat_output = (request != NULL) ? request->lat : NULL;
+    if (lat_output != NULL) {
+        if (shape.size > SIZE_MAX / lat_cols) {
+            return FWHT_ERROR_INVALID_ARGUMENT;
+        }
+    }
+
+#ifdef USE_CUDA
+    const bool prefer_gpu_backend = (backend == FWHT_BACKEND_GPU);
+    bool lat_use_gpu_columns = prefer_gpu_backend;
+#else
+    const bool prefer_gpu_backend = false;
+#endif
+    const bool require_context = (!prefer_gpu_backend && backend != FWHT_BACKEND_AUTO);
+
+    size_t lat_batch_capacity;
+    if (prefer_gpu_backend) {
+        const size_t gpu_batch_hint = 256;
+        const size_t gpu_batch_cap = 1024;
+        const size_t gpu_batch_target_bytes = 64ull * 1024ull * 1024ull;
+        lat_batch_capacity = gpu_batch_hint;
+        size_t bytes_per_column = (shape.size > SIZE_MAX / sizeof(int32_t))
+                                      ? SIZE_MAX
+                                      : shape.size * sizeof(int32_t);
+        if (bytes_per_column != 0) {
+            size_t bytes_limit = gpu_batch_target_bytes / bytes_per_column;
+            if (bytes_limit == 0) {
+                bytes_limit = 1;
+            }
+            if (bytes_limit < lat_batch_capacity) {
+                lat_batch_capacity = bytes_limit;
+            }
+        }
+        if (lat_batch_capacity > gpu_batch_cap) {
+            lat_batch_capacity = gpu_batch_cap;
+        }
+    } else {
+        lat_batch_capacity = 8;
+    }
+    if (lat_batch_capacity == 0) {
+        lat_batch_capacity = 1;
+    }
+    if (lat_batch_capacity > lat_cols) {
+        lat_batch_capacity = lat_cols;
+    }
+    if (lat_batch_capacity > (size_t)INT_MAX) {
+        lat_batch_capacity = (size_t)INT_MAX;
+    }
+    if (shape.size > 0 && lat_batch_capacity > SIZE_MAX / shape.size) {
+        return FWHT_ERROR_INVALID_ARGUMENT;
+    }
+
+    fwht_context_t* ctx = NULL;
+    double lat_column_seconds = 0.0;
+    double lat_fwht_seconds = 0.0;
+    fwht_status_t result = FWHT_SUCCESS;
+
+    int32_t* lat_batch_buffer = NULL;
+    int32_t** lat_batch_ptrs = NULL;
+#ifdef USE_CUDA
+    size_t* lat_mask_list = NULL;
+    bool lat_buffer_pinned = false;
+#endif
+
+    lat_batch_buffer = (int32_t*)malloc(lat_batch_capacity * shape.size * sizeof(int32_t));
+    lat_batch_ptrs = (int32_t**)malloc(lat_batch_capacity * sizeof(int32_t*));
+    if (lat_batch_buffer == NULL || lat_batch_ptrs == NULL) {
+        result = FWHT_ERROR_OUT_OF_MEMORY;
+        goto lat_cleanup;
+    }
+#ifdef USE_CUDA
+    if (lat_use_gpu_columns) {
+        lat_mask_list = (size_t*)malloc(lat_batch_capacity * sizeof(size_t));
+        if (lat_mask_list == NULL) {
+            lat_use_gpu_columns = false;
+        }
+    }
+#endif
+
+    if (require_context) {
+        fwht_config_t cfg = fwht_default_config();
+        cfg.backend = backend;
+        ctx = fwht_create_context(&cfg);
+        if (ctx == NULL) {
+            result = FWHT_ERROR_OUT_OF_MEMORY;
+            goto lat_cleanup;
+        }
+    }
+
+    for (size_t i = 0; i < lat_batch_capacity; ++i) {
+        lat_batch_ptrs[i] = lat_batch_buffer + i * shape.size;
+    }
+
+#ifdef USE_CUDA
+    if (lat_use_gpu_columns) {
+        size_t host_bytes = lat_batch_capacity * shape.size * sizeof(int32_t);
+        if (cudaHostRegister(lat_batch_buffer, host_bytes, cudaHostRegisterPortable) == cudaSuccess) {
+            lat_buffer_pinned = true;
+        }
+        fwht_status_t ws_status = fwht_sbox_gpu_workspace_init();
+        if (ws_status != FWHT_SUCCESS ||
+            fwht_sbox_gpu_reserve_lat_buffer(shape.size, lat_batch_capacity) != FWHT_SUCCESS) {
+            lat_use_gpu_columns = false;
+            if (lat_buffer_pinned) {
+                cudaHostUnregister(lat_batch_buffer);
+                lat_buffer_pinned = false;
+            }
+        }
+    }
+#endif
+
+    const size_t lat_stride = lat_cols;
+    int32_t lat_max_abs = 0;
+
+    for (size_t base = 0; base < lat_cols; base += lat_batch_capacity) {
+        size_t current = lat_batch_capacity;
+        if (base + current > lat_cols) {
+            current = lat_cols - base;
+        }
+
+        bool combined_on_gpu = false;
+#ifdef USE_CUDA
+        if (lat_use_gpu_columns) {
+            for (size_t col = 0; col < current; ++col) {
+                lat_mask_list[col] = base + col;
+            }
+            fwht_status_t gpu_status = fwht_sbox_gpu_process_lat_batch(table,
+                                                                        shape.size,
+                                                                        lat_mask_list,
+                                                                        current,
+                                                                        lat_batch_buffer,
+                                                                        profile_timings ? &lat_column_seconds : NULL,
+                                                                        profile_timings ? &lat_fwht_seconds : NULL,
+                                                                        profile_timings);
+            if (gpu_status == FWHT_SUCCESS) {
+                combined_on_gpu = true;
+            } else if (gpu_status == FWHT_ERROR_BACKEND_UNAVAILABLE) {
+                lat_use_gpu_columns = false;
+            } else {
+                result = gpu_status;
+                goto lat_cleanup;
+            }
+        }
+#endif
+        if (!combined_on_gpu) {
+            double combine_start = profile_timings ? fwht_now_seconds() : 0.0;
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
+            for (size_t col = 0; col < current; ++col) {
+                size_t mask = base + col;
+                int32_t* dst = lat_batch_ptrs[col];
+                fwht_lat_build_from_table(table, shape.size, mask, dst);
+            }
+            if (profile_timings) {
+                lat_column_seconds += fwht_now_seconds() - combine_start;
+            }
+
+            double lat_fwht_start = profile_timings ? fwht_now_seconds() : 0.0;
+            fwht_status_t lat_status = fwht_batch_i32(ctx, lat_batch_ptrs, shape.size, (int)current);
+            if (profile_timings) {
+                lat_fwht_seconds += fwht_now_seconds() - lat_fwht_start;
+            }
+            if (lat_status != FWHT_SUCCESS) {
+                result = lat_status;
+                goto lat_cleanup;
+            }
+        }
+
+        for (size_t col = 0; col < current; ++col) {
+            size_t mask = base + col;
+            int32_t* column_data = lat_batch_ptrs[col];
+            for (size_t row = 0; row < shape.size; ++row) {
+                int32_t value = column_data[row];
+                int32_t abs_val = fwht_i32_abs(value);
+                if (abs_val > lat_max_abs) {
+                    lat_max_abs = abs_val;
+                }
+                if (lat_output != NULL) {
+                    lat_output[row * lat_stride + mask] = value;
+                }
+            }
+        }
+    }
+
+    tmp.lat_max = lat_max_abs;
+    tmp.lat_max_bias = (lat_max_abs > 0) ? ((double)lat_max_abs / (double)shape.size) : 0.0;
+    if (profile_timings) {
+        tmp.column_ms = lat_column_seconds * 1000.0;
+        tmp.fwht_ms = lat_fwht_seconds * 1000.0;
+    }
+
+lat_cleanup:
+#ifdef USE_CUDA
+    if (lat_mask_list) {
+        free(lat_mask_list);
+    }
+    if (lat_buffer_pinned) {
+        cudaHostUnregister(lat_batch_buffer);
+    }
+#endif
+    if (lat_batch_ptrs) {
+        free(lat_batch_ptrs);
+    }
+    if (lat_batch_buffer) {
+        free(lat_batch_buffer);
+    }
+    if (ctx) {
+        fwht_destroy_context(ctx);
+    }
+
+    if (result == FWHT_SUCCESS) {
+        *metrics = tmp;
+    }
+    return result;
 }

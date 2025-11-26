@@ -189,19 +189,21 @@ static int run_sbox_mode(const value_buffer_t* buffer,
         return 1;
     }
 
+    int exit_code = 1;
+    int32_t* component_buf = NULL;
+    int32_t* lat_buf = NULL;
+
     uint32_t max_entry = 0;
     for (size_t i = 0; i < size; ++i) {
         double value = buffer->data[i];
         double int_part;
         if (modf(value, &int_part) != 0.0) {
             fprintf(stderr, "Error: S-box values must be integers (got %.6f).\n", value);
-            free(table);
-            return 1;
+            goto sbox_cleanup;
         }
         if (int_part < 0.0 || int_part > (double)UINT32_MAX) {
             fprintf(stderr, "Error: S-box value %.0f out of uint32 range.\n", int_part);
-            free(table);
-            return 1;
+            goto sbox_cleanup;
         }
         table[i] = (uint32_t)int_part;
         if (table[i] > max_entry) {
@@ -212,8 +214,7 @@ static int run_sbox_mode(const value_buffer_t* buffer,
     if (max_entry >= size) {
         fprintf(stderr, "Error: S-box outputs must be < 2^m (max=%u, size=%zu).\n",
                 max_entry, size);
-        free(table);
-        return 1;
+        goto sbox_cleanup;
     }
 
     size_t n_bits = bit_length_u32(max_entry);
@@ -222,122 +223,119 @@ static int run_sbox_mode(const value_buffer_t* buffer,
     }
 
     const size_t bit_capacity = sizeof(size_t) * CHAR_BIT;
-    if ((lat_path || lat_stats) && n_bits >= bit_capacity) {
+    int need_lat = (lat_path != NULL) || lat_stats;
+    if (need_lat && n_bits >= bit_capacity) {
         fprintf(stderr, "Error: LAT output requires n < %zu bits.\n", bit_capacity);
-        free(table);
-        return 1;
+        goto sbox_cleanup;
     }
 
     size_t lat_cols = (n_bits >= bit_capacity) ? 0 : ((size_t)1 << n_bits);
 
-    int32_t* component_buf = NULL;
     if (component_path) {
         if (n_bits != 0 && size > SIZE_MAX / n_bits) {
             fprintf(stderr, "Error: component buffer would overflow.\n");
-            free(table);
-            return 1;
+            goto sbox_cleanup;
         }
         size_t total = n_bits * size;
         if (total > SIZE_MAX / sizeof(int32_t)) {
             fprintf(stderr, "Error: component buffer too large.\n");
-            free(table);
-            return 1;
+            goto sbox_cleanup;
         }
         component_buf = (int32_t*)malloc(total * sizeof(int32_t));
         if (!component_buf) {
             fprintf(stderr, "Error: memory allocation failed (%s).\n", strerror(errno));
-            free(table);
-            return 1;
+            goto sbox_cleanup;
         }
     }
 
-    int32_t* lat_buf = NULL;
     if (lat_path) {
         if (lat_cols != 0 && size > SIZE_MAX / lat_cols) {
             fprintf(stderr, "Error: LAT buffer would overflow.\n");
-            free(component_buf);
-            free(table);
-            return 1;
+            goto sbox_cleanup;
         }
         size_t total = size * lat_cols;
         if (total > SIZE_MAX / sizeof(int32_t)) {
             fprintf(stderr, "Error: LAT buffer too large.\n");
-            free(component_buf);
-            free(table);
-            return 1;
+            goto sbox_cleanup;
         }
         lat_buf = (int32_t*)malloc(total * sizeof(int32_t));
         if (!lat_buf) {
             fprintf(stderr, "Error: memory allocation failed (%s).\n", strerror(errno));
-            free(component_buf);
-            free(table);
-            return 1;
+            goto sbox_cleanup;
         }
     }
 
-    fwht_sbox_request_t request = {0};
-    request.backend = backend;
-    request.component_spectra = component_buf;
-    request.lat = lat_buf;
-    request.compute_lat = (lat_path != NULL) || lat_stats;
-    request.profile_timings = profile_timings ? true : false;
-
-    fwht_sbox_metrics_t metrics;
-    fwht_status_t status = fwht_sbox_analyze(table, size, &request, &metrics);
+    fwht_sbox_component_request_t comp_request = {
+        .backend = backend,
+        .profile_timings = profile_timings ? true : false,
+        .spectra = component_buf
+    };
+    fwht_sbox_component_metrics_t comp_metrics;
+    fwht_status_t status = fwht_sbox_analyze_components(table, size, &comp_request, &comp_metrics);
     if (status != FWHT_SUCCESS) {
-        fprintf(stderr, "Error: S-box analysis failed (%s).\n", fwht_error_string(status));
-        free(lat_buf);
-        free(component_buf);
-        free(table);
-        return 1;
+        fprintf(stderr, "Error: component analysis failed (%s).\n", fwht_error_string(status));
+        goto sbox_cleanup;
+    }
+
+    fwht_sbox_lat_metrics_t lat_metrics;
+    int have_lat_metrics = 0;
+    if (need_lat) {
+        fwht_sbox_lat_request_t lat_request = {
+            .backend = backend,
+            .profile_timings = profile_timings ? true : false,
+            .lat = lat_buf
+        };
+        status = fwht_sbox_analyze_lat(table, size, &lat_request, &lat_metrics);
+        if (status != FWHT_SUCCESS) {
+            fprintf(stderr, "Error: LAT analysis failed (%s).\n", fwht_error_string(status));
+            goto sbox_cleanup;
+        }
+        have_lat_metrics = 1;
     }
 
     if (!quiet) {
         printf("# S-box analysis\n");
     }
-    printf("m_bits: %zu\n", metrics.m);
-    printf("n_bits: %zu\n", metrics.n);
-    printf("size: %zu\n", metrics.size);
-    printf("component_max_walsh: %d\n", metrics.component_max_walsh);
-    printf("component_min_nonlinearity: %.6f\n", metrics.component_min_nonlinearity);
-    if (metrics.lat_max != 0 || ((lat_path || lat_stats))) {
-        printf("lat_max: %d\n", metrics.lat_max);
-        printf("lat_max_bias: %.6f\n", metrics.lat_max_bias);
+    printf("m_bits: %zu\n", comp_metrics.m);
+    printf("n_bits: %zu\n", comp_metrics.n);
+    printf("size: %zu\n", comp_metrics.size);
+    printf("component_max_walsh: %d\n", comp_metrics.max_walsh);
+    printf("component_min_nonlinearity: %.6f\n", comp_metrics.min_nonlinearity);
+    if (have_lat_metrics) {
+        printf("lat_max: %d\n", lat_metrics.lat_max);
+        printf("lat_max_bias: %.6f\n", lat_metrics.lat_max_bias);
     }
 
     if (profile_timings) {
-        printf("component_fwht_ms: %.3f\n", metrics.component_fwht_ms);
-        if (request.compute_lat) {
-            printf("lat_column_ms: %.3f\n", metrics.lat_column_ms);
-            printf("lat_fwht_ms: %.3f\n", metrics.lat_fwht_ms);
+        printf("component_fwht_ms: %.3f\n", comp_metrics.fwht_ms);
+        if (have_lat_metrics) {
+            printf("lat_column_ms: %.3f\n", lat_metrics.column_ms);
+            printf("lat_fwht_ms: %.3f\n", lat_metrics.fwht_ms);
         }
     }
 
     if (component_path && component_buf) {
-        if (write_component_file(component_path, component_buf, metrics.n, metrics.size) != 0) {
+        if (write_component_file(component_path, component_buf, comp_metrics.n, comp_metrics.size) != 0) {
             fprintf(stderr, "Error: failed to write component spectra.\n");
-            free(lat_buf);
-            free(component_buf);
-            free(table);
-            return 1;
+            goto sbox_cleanup;
         }
     }
 
     if (lat_path && lat_buf) {
-        size_t cols = (size_t)1 << metrics.n;
-        if (write_lat_file(lat_path, lat_buf, metrics.size, cols, metrics.m, metrics.n) != 0) {
+        size_t cols = (size_t)1 << lat_metrics.n;
+        if (write_lat_file(lat_path, lat_buf, lat_metrics.size, cols, lat_metrics.m, lat_metrics.n) != 0) {
             fprintf(stderr, "Error: failed to write LAT output.\n");
-            free(lat_buf);
-            free(component_buf);
-            free(table);
-            return 1;
+            goto sbox_cleanup;
         }
     }
 
+    exit_code = 0;
+
+sbox_cleanup:
     free(lat_buf);
     free(component_buf);
     free(table);
-    return 0;
+    return exit_code;
 }
 
 static int append_token(const char *token, input_format_t format, value_buffer_t *buffer) {
@@ -350,7 +348,6 @@ static int append_token(const char *token, input_format_t format, value_buffer_t
         }
         return append_value(buffer, value);
     }
-
     long value = strtol(token, &endptr, 10);
     if (endptr == token || *endptr != '\0') {
         fprintf(stderr, "Error: invalid integer token '%s'.\n", token);

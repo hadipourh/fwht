@@ -831,32 +831,38 @@ TEST(sbox_identity_matches_reference) {
 
     int32_t component_buf[3 * 8];
     int32_t lat_buf[8 * 8];
-    fwht_sbox_request_t req = {
+    fwht_sbox_component_request_t comp_req = {
         .backend = FWHT_BACKEND_CPU,
-        .compute_lat = true,
-        .component_spectra = component_buf,
+        .spectra = component_buf
+    };
+    fwht_sbox_component_metrics_t comp_metrics;
+    fwht_status_t status = fwht_sbox_analyze_components(table, size, &comp_req, &comp_metrics);
+    ASSERT_STATUS(status, FWHT_SUCCESS);
+    ASSERT(comp_metrics.n == 3, "Expected 3-bit output");
+    ASSERT_EQ_I32(comp_metrics.max_walsh, 8);
+    ASSERT_NEAR_F64(comp_metrics.min_nonlinearity, 0.0, 1e-12);
+
+    fwht_sbox_lat_request_t lat_req = {
+        .backend = FWHT_BACKEND_CPU,
         .lat = lat_buf
     };
-
-    fwht_sbox_metrics_t metrics;
-    fwht_status_t status = fwht_sbox_analyze(table, size, &req, &metrics);
+    fwht_sbox_lat_metrics_t lat_metrics;
+    status = fwht_sbox_analyze_lat(table, size, &lat_req, &lat_metrics);
     ASSERT_STATUS(status, FWHT_SUCCESS);
-    ASSERT(metrics.n == 3, "Expected 3-bit output");
-    ASSERT_EQ_I32(metrics.component_max_walsh, 8);
-    ASSERT_NEAR_F64(metrics.component_min_nonlinearity, 0.0, 1e-12);
-    ASSERT_EQ_I32(metrics.lat_max, 8);
-    ASSERT_NEAR_F64(metrics.lat_max_bias, 1.0, 1e-12);
+    ASSERT(lat_metrics.n == 3, "Expected 3-bit output");
+    ASSERT_EQ_I32(lat_metrics.lat_max, 8);
+    ASSERT_NEAR_F64(lat_metrics.lat_max_bias, 1.0, 1e-12);
 
     int32_t ref_comp[3 * 8];
     int32_t ref_lat[8 * 8];
-    naive_component_spectra(table, size, metrics.n, ref_comp);
-    naive_lat(table, size, metrics.n, ref_lat);
+    naive_component_spectra(table, size, comp_metrics.n, ref_comp);
+    naive_lat(table, size, lat_metrics.n, ref_lat);
 
     for (size_t i = 0; i < 3 * size; ++i) {
         ASSERT_EQ_I32(component_buf[i], ref_comp[i]);
     }
 
-    size_t lat_cols = (size_t)1 << metrics.n;
+    size_t lat_cols = (size_t)1 << lat_metrics.n;
     for (size_t a = 0; a < size; ++a) {
         for (size_t b = 0; b < lat_cols; ++b) {
             size_t idx = a * lat_cols + b;
@@ -870,36 +876,75 @@ TEST(sbox_random_matches_naive) {
     const uint32_t table[8] = {6, 5, 0, 7, 2, 1, 3, 4};
 
     int32_t component_buf[3 * 8];
-    fwht_sbox_request_t req = {
+    fwht_sbox_component_request_t comp_req = {
         .backend = FWHT_BACKEND_CPU,
-        .compute_lat = true,
-        .component_spectra = component_buf,
-        .lat = NULL
+        .spectra = component_buf
     };
-
-    fwht_sbox_metrics_t metrics;
-    fwht_status_t status = fwht_sbox_analyze(table, size, &req, &metrics);
+    fwht_sbox_component_metrics_t comp_metrics;
+    fwht_status_t status = fwht_sbox_analyze_components(table, size, &comp_req, &comp_metrics);
     ASSERT_STATUS(status, FWHT_SUCCESS);
-    ASSERT(metrics.n == 3, "Expected 3-bit output");
+    ASSERT(comp_metrics.n == 3, "Expected 3-bit output");
 
     int32_t ref_comp[3 * 8];
-    naive_component_spectra(table, size, metrics.n, ref_comp);
+    naive_component_spectra(table, size, comp_metrics.n, ref_comp);
     for (size_t i = 0; i < 3 * size; ++i) {
         ASSERT_EQ_I32(component_buf[i], ref_comp[i]);
     }
 
     int32_t ref_lat[8 * 8];
-    naive_lat(table, size, metrics.n, ref_lat);
+    naive_lat(table, size, comp_metrics.n, ref_lat);
     int32_t ref_lat_max = 0;
-    for (size_t i = 0; i < size * ((size_t)1 << metrics.n); ++i) {
+    for (size_t i = 0; i < size * ((size_t)1 << comp_metrics.n); ++i) {
         int32_t abs_val = ref_lat[i] >= 0 ? ref_lat[i] : -ref_lat[i];
         if (abs_val > ref_lat_max) {
             ref_lat_max = abs_val;
         }
     }
-    ASSERT_EQ_I32(metrics.lat_max, ref_lat_max);
+    fwht_sbox_lat_request_t lat_req = {
+        .backend = FWHT_BACKEND_CPU
+    };
+    fwht_sbox_lat_metrics_t lat_metrics;
+    status = fwht_sbox_analyze_lat(table, size, &lat_req, &lat_metrics);
+    ASSERT_STATUS(status, FWHT_SUCCESS);
+    ASSERT(lat_metrics.n == comp_metrics.n, "Expected matching output width");
+    ASSERT_EQ_I32(lat_metrics.lat_max, ref_lat_max);
     double ref_bias = (double)ref_lat_max / (double)size;
-    ASSERT_NEAR_F64(metrics.lat_max_bias, ref_bias, 1e-12);
+    ASSERT_NEAR_F64(lat_metrics.lat_max_bias, ref_bias, 1e-12);
+}
+
+TEST(sbox_lat_only_skips_components) {
+    const size_t size = 16;
+    uint32_t table[16];
+    for (size_t i = 0; i < size; ++i) {
+        table[i] = (uint32_t)((i * 5) & (size - 1));
+    }
+
+    int32_t lat_buf[16 * 16];
+    fwht_sbox_lat_request_t lat_req = {
+        .backend = FWHT_BACKEND_CPU,
+        .lat = lat_buf
+    };
+
+    fwht_sbox_lat_metrics_t lat_metrics;
+    fwht_status_t status = fwht_sbox_analyze_lat(table, size, &lat_req, &lat_metrics);
+    ASSERT_STATUS(status, FWHT_SUCCESS);
+    ASSERT(lat_metrics.n == 4, "Expected 4-bit output");
+
+    int32_t ref_lat[16 * 16];
+    naive_lat(table, size, lat_metrics.n, ref_lat);
+    for (size_t idx = 0; idx < size * ((size_t)1 << lat_metrics.n); ++idx) {
+        ASSERT_EQ_I32(lat_buf[idx], ref_lat[idx]);
+    }
+    int32_t ref_lat_max = 0;
+    for (size_t idx = 0; idx < size * ((size_t)1 << lat_metrics.n); ++idx) {
+        int32_t abs_val = ref_lat[idx] >= 0 ? ref_lat[idx] : -ref_lat[idx];
+        if (abs_val > ref_lat_max) {
+            ref_lat_max = abs_val;
+        }
+    }
+    ASSERT_EQ_I32(lat_metrics.lat_max, ref_lat_max);
+    double ref_bias = (double)ref_lat_max / (double)size;
+    ASSERT_NEAR_F64(lat_metrics.lat_max_bias, ref_bias, 1e-12);
 }
 
 /* ============================================================================
@@ -975,6 +1020,7 @@ int main(void) {
     /* S-box analysis */
     run_test_sbox_identity_matches_reference();
     run_test_sbox_random_matches_naive();
+    run_test_sbox_lat_only_skips_components();
     
     /* Summary */
     printf("\n===================================================================\n");

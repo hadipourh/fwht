@@ -543,27 +543,42 @@ typedef struct {
     size_t   m;                       /* Input width (size = 2^m) */
     size_t   n;                       /* Output width inferred from LUT */
     size_t   size;                    /* Convenience alias for 2^m */
-    int32_t  component_max_walsh;     /* Max |Walsh| among Boolean components */
-    double   component_min_nonlinearity; /* Smallest nonlinearity across components */
-    int32_t  lat_max;                 /* Max |LAT| entry (0 if LAT not computed) */
-    double   lat_max_bias;            /* lat_max / size (0 if LAT not computed) */
-    double   component_fwht_ms;       /* Time spent computing component spectra (ms) */
-    double   lat_column_ms;           /* Time spent synthesizing LAT columns (ms) */
-    double   lat_fwht_ms;             /* Time spent transforming LAT columns (ms) */
-} fwht_sbox_metrics_t;
+    int32_t  max_walsh;               /* Max |Walsh| among Boolean components */
+    double   min_nonlinearity;        /* Smallest nonlinearity across components */
+    double   fwht_ms;                 /* Time spent computing component spectra (ms) */
+} fwht_sbox_component_metrics_t;
 
 typedef struct {
     fwht_backend_t backend;           /* Preferred backend (AUTO if unspecified) */
-    bool           compute_lat;       /* Force LAT computation even if lat buffer NULL */
-    bool           profile_timings;   /* Collect per-phase timing metrics */
-    int32_t*       component_spectra; /* Optional buffer (n * size entries, contiguous) */
-    int32_t*       lat;               /* Optional row-major LAT buffer: size × 2^n */
-} fwht_sbox_request_t;
+    bool           profile_timings;   /* Collect FWHT timing metrics */
+    int32_t*       spectra;           /* Optional buffer (n * size entries, contiguous) */
+} fwht_sbox_component_request_t;
 
-fwht_status_t fwht_sbox_analyze(const uint32_t* table,
-                                size_t size,
-                                const fwht_sbox_request_t* request,
-                                fwht_sbox_metrics_t* metrics);
+typedef struct {
+    size_t   m;                       /* Input width (size = 2^m) */
+    size_t   n;                       /* Output width inferred from LUT */
+    size_t   size;                    /* Convenience alias for 2^m */
+    int32_t  lat_max;                 /* Max |LAT| entry */
+    double   lat_max_bias;            /* lat_max / size */
+    double   column_ms;               /* Time spent synthesizing LAT columns (ms) */
+    double   fwht_ms;                 /* Time spent transforming LAT columns (ms) */
+} fwht_sbox_lat_metrics_t;
+
+typedef struct {
+    fwht_backend_t backend;           /* Preferred backend (AUTO if unspecified) */
+    bool           profile_timings;   /* Collect column/FWHT timing metrics */
+    int32_t*       lat;               /* Optional row-major LAT buffer: size × 2^n */
+} fwht_sbox_lat_request_t;
+
+fwht_status_t fwht_sbox_analyze_components(const uint32_t* table,
+                                            size_t size,
+                                            const fwht_sbox_component_request_t* request,
+                                            fwht_sbox_component_metrics_t* metrics);
+
+fwht_status_t fwht_sbox_analyze_lat(const uint32_t* table,
+                                     size_t size,
+                                     const fwht_sbox_lat_request_t* request,
+                                     fwht_sbox_lat_metrics_t* metrics);
 
 /* ============================================================================
  * BIT-SLICED BOOLEAN WHT (HIGH PERFORMANCE FOR CRYPTOGRAPHY)
