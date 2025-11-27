@@ -14,8 +14,22 @@ from pybind11.setup_helpers import Pybind11Extension, build_ext
 # Paths relative to python/ directory
 PYTHON_DIR = Path(__file__).parent.absolute()
 PROJECT_ROOT = PYTHON_DIR.parent  # Go up to libfwht/
-INCLUDE_DIR = PROJECT_ROOT / "include"
-SRC_DIR = PROJECT_ROOT / "src"
+
+# Primary (repo) locations
+REPO_INCLUDE_DIR = PROJECT_ROOT / "include"
+REPO_SRC_DIR = PROJECT_ROOT / "src"
+
+# Vendored fallback (generated before building sdist)
+VENDORED_ROOT = PYTHON_DIR / "pyfwht" / "_libfwht"
+VENDORED_INCLUDE_DIR = VENDORED_ROOT / "include"
+VENDORED_SRC_DIR = VENDORED_ROOT / "src"
+
+if REPO_INCLUDE_DIR.exists() and REPO_SRC_DIR.exists():
+    INCLUDE_DIR = REPO_INCLUDE_DIR
+    SRC_DIR = REPO_SRC_DIR
+else:
+    INCLUDE_DIR = VENDORED_INCLUDE_DIR
+    SRC_DIR = VENDORED_SRC_DIR
 
 # Validate paths
 if not INCLUDE_DIR.exists():
@@ -92,7 +106,7 @@ print("=" * 70)
 extra_compile_args = ['-O3', '-std=c++17', '-fPIC']
 extra_link_args = []
 define_macros = []
-include_dirs_list = [str(INCLUDE_DIR), str(PYTHON_DIR / "include")]  # Add DLPack include path
+include_dirs_list = [str(INCLUDE_DIR), str(SRC_DIR), str(PYTHON_DIR / "include")]  # Add DLPack include path
 
 # Platform-specific optimizations
 if sys.platform == 'darwin':  # macOS

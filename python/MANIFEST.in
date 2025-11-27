@@ -1,6 +1,7 @@
 include README.md
 include LICENSE
 recursive-include pyfwht *.py *.pyi
+recursive-include pyfwht/_libfwht *
 recursive-include src *.cpp *.h
 
 # Include parent library sources (will be in sdist)
