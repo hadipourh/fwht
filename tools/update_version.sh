@@ -53,7 +53,7 @@ rm python/pyproject.toml.bak
 
 # Update test file
 echo "  → tests/test_correctness.c"
-sed -i.bak "s/strcmp(version, \".*\")/strcmp(version, \"$NEW_VERSION\")/" tests/test_correctness.c
+sed -i.bak "s/strcmp(version, \"[^\"]*\")/strcmp(version, \"$NEW_VERSION\")/" tests/test_correctness.c
 rm tests/test_correctness.c.bak
 
 # Python bindings build directly against src/, so no sync step is required.
