@@ -11,7 +11,8 @@ Python bindings for the high-performance libfwht library, providing Fast Walsh-H
 - **Multi-precision GPU**: fp64 (cryptographic), fp32 (balanced), fp16 (maximum speed, up to 54× faster with PyTorch DLPack)
 - **All data types**: Support for `int8`, `int32`, and `float64` with overflow protection
 - **Boolean function analysis**: Convenience functions for cryptographic applications
-- **Bit-packed Boolean WHT**: Compute WHT directly from `uint64`-packed truth tables via `fwht.boolean_packed()`
+- **Bit-packed Boolean WHT**: Compute WHT directly from `uint64`-packed truth tables via `fwht.boolean_packed()` (set `backend=fwht.Backend.GPU` to expand on the device for n ≤ 65536)
+- **GPU-resident Boolean contexts**: repeated `fwht.boolean_packed(..., backend=fwht.Backend.GPU)` calls automatically reuse the CUDA buffers via `fwht_gpu_boolean_context_*`, eliminating per-call allocations on S-box workloads
 - **High performance**: 
   - GPU fp16: Up to **1115 GOps/s** on RTX 4090 with PyTorch DLPack (zero-copy, exceeds Meta by 38%)
   - GPU fp32: Up to **625 GOps/s** with perfect accuracy
@@ -80,233 +81,16 @@ print(data)  # Transformed coefficients
 ### Boolean Function Analysis
 
 ```python
-# XOR function: f(x,y) = x ⊕ y
-truth_table = np.array([0, 1, 1, 0], dtype=np.uint8)
+## Performance & Precision Reference
 
-# Compute WHT coefficients (0→+1, 1→-1 convention)
-wht_coeffs = fwht.from_bool(truth_table, signed=True)
+Detailed benchmark tables, GPU multi-precision comparisons, and FP16 precision guidelines live in the top-level `README.md`. The Python README focuses on installation and API usage—consult the root documentation whenever you need:
 
-# Compute correlations with all linear functions
-correlations = fwht.correlations(truth_table)
-max_correlation = np.max(np.abs(correlations))
-print(f"Maximum absolute correlation: {max_correlation}")
-```
+- GOps/s numbers for each backend or hardware platform
+- Tensor Core coverage, runtime warnings, and accuracy graphs for fp16/fp32/fp64
+- End-to-end benchmarking instructions (CLI, C harnesses, and Python runners)
 
-### Bit-packed Boolean Functions
+All measurements and architectural notes are kept in a single place to avoid divergence between the C and Python docs.
 
-```python
-import numpy as np
-import pyfwht as fwht
-
-# Pack [0,1,1,0,1,0,0,1] → bits 1,2,4,7 set (0x96)
-packed = np.array([0x96], dtype=np.uint64)
-wht = fwht.boolean_packed(packed, n=8)
-print(wht)
-
-# Larger example
-n = 256
-truth_table = np.random.randint(0, 2, size=n, dtype=np.uint8)
-n_words = (n + 63) // 64
-packed = np.zeros(n_words, dtype=np.uint64)
-for i in range(n):
-  if truth_table[i]:
-    packed[i // 64] |= (1 << (i % 64))
-wht2 = fwht.boolean_packed(packed, n=n)
-```
-
-### Backend Selection
-
-```python
-# Automatic backend selection (recommended)
-fwht.transform(data)  # or backend=fwht.Backend.AUTO
-
-# Check availability first
-print("OpenMP available:", fwht.has_openmp())
-print("GPU/CUDA available:", fwht.has_gpu())
-
-# Explicit backend
-fwht.transform(data, backend=fwht.Backend.CPU)     # Single-threaded SIMD
-fwht.transform(data, backend=fwht.Backend.OPENMP)  # Multi-threaded
-
-# Use GPU only if available
-if fwht.has_gpu():
-    fwht.transform(data, backend=fwht.Backend.GPU)
-```
-
-### GPU Multi-Precision (Fast Path)
-
-For GPU transforms, precision is automatically selected based on PyTorch tensor dtype:
-
-```python
-import torch
-import pyfwht
-
-# Create data on GPU with desired precision
-data_fp64 = torch.randn(100, 4096, dtype=torch.float64, device='cuda')
-data_fp32 = torch.randn(100, 4096, dtype=torch.float32, device='cuda')
-data_fp16 = torch.randn(100, 4096, dtype=torch.float16, device='cuda')
-
-# DLPack API dispatches to precision-optimized kernels
-pyfwht.gpu.batch_transform_dlpack(data_fp64)  # fp64: cryptographic precision
-pyfwht.gpu.batch_transform_dlpack(data_fp32)  # fp32: 25× faster, ~1e-6 error
-pyfwht.gpu.batch_transform_dlpack(data_fp16)  # fp16: up to 54× faster with DLPack, ~1e-3 error (ideal for ML)
-
-# Results are in-place
-print(f"fp16 result shape: {data_fp16.shape}")
-```
-
-**Precision Trade-offs:**
-- **fp64**: Maximum accuracy (~1e-15), best for cryptanalysis
-- **fp32**: Balanced (25-30× faster, ~1e-6 error)
-- **fp16**: Maximum speed (up to 54× faster with PyTorch DLPack, ~1e-3 error, perfect for machine learning)
-
-### Efficient Repeated Transforms
-
-For computing many WHTs, use `Context` to reuse resources:
-
-```python
-with fwht.Context(backend=fwht.Backend.OPENMP) as ctx:
-    for _ in range(1000):
-        data = generate_data()
-        ctx.transform(data)  # Faster than repeated fwht.transform()
-```
-
-## API Reference
-
-### Main Functions
-
-#### `transform(data, backend=None)`
-
-In-place Walsh-Hadamard Transform with automatic dtype dispatch.
-
-- **Parameters:**
-  - `data`: 1-D NumPy array of `int8`, `int32`, or `float64`
-  - `backend`: Optional `Backend` enum (`AUTO`, `CPU`, `OPENMP`, `GPU`)
-- **Modifies:** `data` in-place
-- **Complexity:** O(n log n) where n = 2^k is the array length
-
-```python
-data = np.array([1, -1, -1, 1], dtype=np.int32)
-fwht.transform(data)  # data is modified
-```
-
-#### `compute(data, backend=None)`
-
-Out-of-place transform (input unchanged, returns new array).
-
-- **Parameters:**
-  - `data`: 1-D NumPy array of `int32` or `float64`
-  - `backend`: Optional backend selection
-- **Returns:** New NumPy array with transform result
-
-```python
-original = np.array([1, -1, -1, 1], dtype=np.int32)
-result = fwht.compute(original)
-# original is unchanged, result contains WHT
-```
-
-#### `from_bool(truth_table, signed=True)`
-
-Compute WHT coefficients from Boolean function truth table.
-
-- **Parameters:**
-  - `truth_table`: 1-D array of 0s and 1s (length = 2^k)
-  - `signed`: If `True`, uses 0→+1, 1→-1 conversion (cryptographic convention)
-- **Returns:** `int32` array of WHT coefficients
-
-```python
-# AND function
-and_table = np.array([0, 0, 0, 1], dtype=np.uint8)
-wht = fwht.from_bool(and_table, signed=True)
-```
-
-#### `correlations(truth_table)`
-
-Compute correlations between Boolean function and all linear functions.
-
-- **Parameters:**
-  - `truth_table`: 1-D array of 0s and 1s
-- **Returns:** `float64` array of correlation values in [-1, 1]
-
-```python
-corr = fwht.correlations(truth_table)
-# corr[u] = correlation with linear function ℓ_u(x) = popcount(u & x) mod 2
-```
-
-### Context API (Advanced)
-
-For applications computing many WHTs, use `Context` to amortize setup costs:
-
-**Context Parameters:**
-- `backend`: Backend selection (`Backend` enum)
-- `num_threads`: Number of OpenMP threads (0 = auto)
-- `gpu_device`: GPU device ID for CUDA
-- `normalize`: If `True`, divide by sqrt(n) after transform
-
-**Methods:**
-- `ctx.transform(data)`: In-place transform (same as module-level function)
-- `ctx.close()`: Explicitly release resources (or use `with` statement)
-
-### Backend Enum
-
-```python
-class Backend(enum.Enum):
-    AUTO = 0    # Automatic selection (recommended)
-    CPU = 1     # Single-threaded SIMD (AVX2/SSE2/NEON)
-    OPENMP = 2  # Multi-threaded CPU
-    GPU = 3     # CUDA-accelerated
-```
-
-### Utility Functions
-
-```python
-fwht.is_power_of_2(n)        # Check if n is power of 2
-fwht.log2(n)                 # Compute log₂(n) for power of 2
-fwht.recommend_backend(n)    # Get recommended backend for size n
-fwht.has_openmp()            # Check OpenMP availability
-fwht.has_gpu()               # Check GPU/CUDA availability
-fwht.version()               # Get library version
-```
-
-## Data Types
-
-| NumPy dtype | C type | Notes |
-|-------------|--------|-------|
-| `np.int32` | `int32_t` | **Recommended** for Boolean functions |
-| `np.float64` | `double` | For numerical applications |
-| `np.int8` | `int8_t` | Memory-efficient; **may overflow** for large n |
-
-## Performance Tips
-
-1. **Choose the right backend for your data size:**
-   - Small arrays (< 2^16): `CPU` backend (SIMD-optimized)
-   - Medium arrays (2^16 - 2^22): `OPENMP` (multi-threaded)
-   - Large arrays (> 2^22): `GPU` if available
-   - Unsure? Use `Backend.AUTO` or `recommend_backend(n)`
-
-2. **Reuse contexts for batch processing:**
-   ```python
-   ctx = fwht.Context(backend=fwht.Backend.OPENMP)
-   for data in dataset:
-       ctx.transform(data)
-   ctx.close()
-   ```
-
-3. **Use `int32` for Boolean functions** (exact arithmetic, no overflow for n ≤ 2^30)
-
-4. **Use `int8` for memory-constrained applications** (but beware overflow for n > 2^7)
-
-## Advanced Examples
-
-### Cryptographic Linear Cryptanalysis
-
-Find the best linear approximation of a Boolean function:
-
-```python
-import numpy as np
-import pyfwht as fwht
-
-# S-box or Boolean function (e.g., 4-bit input, 1-bit output)
 # Example: f(x) for x in {0,1}^4
 truth_table = np.array([0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0], dtype=np.uint8)
 
@@ -361,6 +145,36 @@ print(f"Average nonlinearity: {np.mean(nonlinearities):.2f}")
 print(f"Max nonlinearity: {max(nonlinearities)}")
 print(f"Min nonlinearity: {min(nonlinearities)}")
 print(f"Theoretical max for {num_vars}-bit functions: {2**(num_vars-1) - 2**(num_vars//2 - 1)}")
+```
+
+### Vectorial S-box Analysis
+
+Use the high-level helper to compute Boolean component spectra and full LAT metrics:
+
+```python
+import numpy as np
+import pyfwht as fwht
+
+# 3-bit identity S-box
+table = np.arange(8, dtype=np.uint32)
+
+analysis = fwht.analyze_sbox(
+  table,
+  backend=fwht.Backend.CPU,
+  profile_timings=True,
+  return_spectra=True,
+  return_lat=True,
+)
+
+print("m_bits", analysis.components.m_bits)
+print("n_bits", analysis.components.n_bits)
+print("max_walsh", analysis.components.max_walsh)
+print("lat_max", analysis.lat.lat_max if analysis.lat else None)
+
+# Spectra shape: (n_bits, 2^m)
+spectra = analysis.components.spectra
+# LAT matrix shape: (2^m, 2^n)
+lat_matrix = analysis.lat.lat if analysis.lat else None
 ```
 
 ### Performance Comparison: Backend Selection
@@ -623,7 +437,7 @@ cd python/tests
 python benchmark_all_precisions_fixed.py
 ```
 
-### ⚠️ FP16 Precision Characteristics (Important!)
+### FP16 Precision Characteristics (Important!)
 
 **FP16 provides up to ~35× speedup** (with PyTorch DLPack) but uses limited precision (11-bit mantissa). This is the **expected tradeoff** for Tensor Core acceleration.
 
@@ -664,21 +478,21 @@ When you first use fp16, you'll see a one-time warning:
 
 ```
 ╔═══════════════════════════════════════════════════════════════════════════╗
-║ FP16 Tensor Core Precision Notice                                        ║
+║ FP16 Tensor Core Precision Notice                                         ║
 ╠═══════════════════════════════════════════════════════════════════════════╣
-║ Using float16 Tensor Cores provides 25-36× speedup                       ║
+║ Using float16 Tensor Cores provides 25-36× speedup                        ║
 ║                                                                           ║
 ║ Observed behavior (RTX 4090, CUDA 12.6):                                  ║
 ║   • Boolean {-1,+1} inputs remain bit-exact                               ║
-║   • Random fp32/fp64 data: max|error| ≈ 1.3e-1, mean ≈ 2.5e-2            ║
-║   • Relative error stays < 6e-4 for values in the ±4k range              ║
+║   • Random fp32/fp64 data: max|error| ≈ 1.3e-1, mean ≈ 2.5e-2             ║
+║   • Relative error stays < 6e-4 for values in the ±4k range               ║
 ║                                                                           ║
 ║ Recommended use cases:                                                    ║
-║   • Machine learning / signal processing (PyTorch DLPack)                ║
-║   • Boolean cryptanalysis                                                ║
-║   • High-precision floating workloads (use fp32/fp64 instead)            ║
+║   • Machine learning / signal processing (PyTorch DLPack)                 ║
+║   • Boolean cryptanalysis                                                 ║
+║   • High-precision floating workloads (use fp32/fp64 instead)             ║
 ║                                                                           ║
-║ To suppress this warning: set FWHT_SILENCE_FP16_WARNING=1                ║
+║ To suppress this warning: set FWHT_SILENCE_FP16_WARNING=1                 ║
 ╚═══════════════════════════════════════════════════════════════════════════╝
 ```
 
@@ -701,23 +515,57 @@ GPU fp32 results are **always bit-exact** with CPU int32, proving the difference
 
 ## Examples
 
-See `examples/basic_usage.py` for comprehensive usage demonstrations.
+The `examples/` directory contains comprehensive demonstrations:
+
+- **`basic_usage.py`** - Core API: transforms, backends, Boolean functions, utilities
+- **`boolean_packed.py`** - Bit-packed Boolean WHT for memory-efficient cryptanalysis
+- **`gpu_batch.py`** - GPU batch transforms, profiling, and persistent contexts
+- **`gpu_multi_precision.py`** - fp16/fp32/fp64 with PyTorch DLPack integration
+- **`compare_fast_hadamard.py`** - Benchmarks vs. Dao-AILab's fast-hadamard-transform
+- **`sbox_analysis.py`** - S-box cryptanalysis with LAT computation (includes 16-bit GPU example)
+
+Run any example:
+```bash
+cd examples
+python basic_usage.py
+python sbox_analysis.py  # Shows AES S-box analysis, LAT computation, and 16-bit GPU demo
+```
 
 ## Development
 
 ### Running Tests
 
-First, install the package in development mode:
+The `tests/` directory contains comprehensive Python test suites and benchmarks:
 
 ```bash
-pip install -e .  # Install pyfwht in editable mode
-pip install pytest
+# Install package in development mode
+pip install -e .
+
+# Install testing dependencies
+pip install pytest pytest-cov
+
+# Run all tests
 pytest tests/ -v
 
-# With coverage
-pip install pytest-cov
-pytest tests/ --cov=pyfwht
+# Run with coverage report
+pytest tests/ --cov=pyfwht --cov-report=html
+
+# Run specific test files
+pytest tests/test_correctness.py -v          # Core correctness tests
+pytest tests/test_gpu.py -v                  # GPU tests (requires CUDA)
+
+# Run benchmarks (not part of pytest suite)
+python tests/benchmark_all_precisions_fixed.py     # Multi-precision GPU benchmarks
+python tests/benchmark_compare_meta.py             # Compare vs Dao-AILab implementation
 ```
+
+**Available test files:**
+- `test_correctness.py` - Core API validation (transforms, Boolean functions, backends, batch processing)
+- `test_gpu.py` - GPU-specific tests (Tensor Cores, fp16/fp32/fp64, batch operations, DLPack)
+- `benchmark_all_precisions_fixed.py` - Multi-precision performance benchmarks
+- `benchmark_compare_meta.py` - Comparative benchmarks against fast-hadamard-transform
+
+**GPU Tests:** Tests in `test_gpu.py` automatically skip if CUDA is not available. Build with `USE_CUDA=1 pip install -e .` to enable GPU support.
 
 ### Building Distribution Packages
 

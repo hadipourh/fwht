@@ -12,4 +12,5 @@ extern "C" {
     #include "../../src/fwht_core.c"
     #include "../../src/fwht_backend.c"
     #include "../../src/fwht_batch.c"
+    #include "../../src/fwht_sbox.c"
 }

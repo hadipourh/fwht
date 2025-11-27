@@ -72,6 +72,7 @@ static void print_usage(const char *prog) {
             "  --dtype <i32|f64>       Choose int32 (default) or float64 transforms.\n"
             "  --batch-size <n>        Interpret input as n equal-length transforms.\n"
             "  --input-format <mode>   bool (default), signed, or float (float requires --dtype f64).\n"
+            "                        Boolean mode keeps truth tables bit-packed on the GPU for n ≤ 65536.\n"
             "  --safe                  Enable overflow-checked CPU backend (int32 only).\n"
             "  --normalize             Print coefficients divided by sqrt(n).\n"
             "  --precision <digits>    Decimal precision for floating output (0-%d, default 6).\n"
@@ -83,6 +84,7 @@ static void print_usage(const char *prog) {
             "  --sbox-lat <file>       Write full LAT to file (implies LAT computation).\n"
             "  --sbox-components <file> Write component Walsh spectra to file.\n"
             "  --sbox-lat-stats        Compute LAT statistics even without dumping the matrix.\n"
+            "  --sbox-lat-only         Skip component analysis (requires --sbox-lat or --sbox-lat-stats).\n"
             "  --sbox-profile          Print per-phase timing breakdown for S-box analysis.\n"
             "  --help                  Show this message.\n"
             "\n"
@@ -172,7 +174,8 @@ static int run_sbox_mode(const value_buffer_t* buffer,
                          const char* lat_path,
                          const char* component_path,
                          int lat_stats,
-                         int profile_timings) {
+                         int profile_timings,
+                         int lat_only) {
     size_t size = buffer->length;
     if (size == 0) {
         fprintf(stderr, "Error: S-box mode requires at least one value.\n");
@@ -230,8 +233,15 @@ static int run_sbox_mode(const value_buffer_t* buffer,
     }
 
     size_t lat_cols = (n_bits >= bit_capacity) ? 0 : ((size_t)1 << n_bits);
+    if (lat_only) {
+        need_lat = 1;
+    }
 
     if (component_path) {
+        if (lat_only) {
+            fprintf(stderr, "Error: --sbox-lat-only cannot write component spectra.\n");
+            goto sbox_cleanup;
+        }
         if (n_bits != 0 && size > SIZE_MAX / n_bits) {
             fprintf(stderr, "Error: component buffer would overflow.\n");
             goto sbox_cleanup;
@@ -265,16 +275,19 @@ static int run_sbox_mode(const value_buffer_t* buffer,
         }
     }
 
-    fwht_sbox_component_request_t comp_request = {
-        .backend = backend,
-        .profile_timings = profile_timings ? true : false,
-        .spectra = component_buf
-    };
-    fwht_sbox_component_metrics_t comp_metrics;
-    fwht_status_t status = fwht_sbox_analyze_components(table, size, &comp_request, &comp_metrics);
-    if (status != FWHT_SUCCESS) {
-        fprintf(stderr, "Error: component analysis failed (%s).\n", fwht_error_string(status));
-        goto sbox_cleanup;
+    fwht_sbox_component_metrics_t comp_metrics = {0};
+    fwht_status_t status = FWHT_SUCCESS;
+    if (!lat_only) {
+        fwht_sbox_component_request_t comp_request = {
+            .backend = backend,
+            .profile_timings = profile_timings ? true : false,
+            .spectra = component_buf
+        };
+        status = fwht_sbox_analyze_components(table, size, &comp_request, &comp_metrics);
+        if (status != FWHT_SUCCESS) {
+            fprintf(stderr, "Error: component analysis failed (%s).\n", fwht_error_string(status));
+            goto sbox_cleanup;
+        }
     }
 
     fwht_sbox_lat_metrics_t lat_metrics;
@@ -296,25 +309,29 @@ static int run_sbox_mode(const value_buffer_t* buffer,
     if (!quiet) {
         printf("# S-box analysis\n");
     }
-    printf("m_bits: %zu\n", comp_metrics.m);
-    printf("n_bits: %zu\n", comp_metrics.n);
-    printf("size: %zu\n", comp_metrics.size);
-    printf("component_max_walsh: %d\n", comp_metrics.max_walsh);
-    printf("component_min_nonlinearity: %.6f\n", comp_metrics.min_nonlinearity);
+    if (!lat_only) {
+        printf("m_bits: %zu\n", comp_metrics.m);
+        printf("n_bits: %zu\n", comp_metrics.n);
+        printf("size: %zu\n", comp_metrics.size);
+        printf("component_max_walsh: %d\n", comp_metrics.max_walsh);
+        printf("component_min_nonlinearity: %.6f\n", comp_metrics.min_nonlinearity);
+    }
     if (have_lat_metrics) {
         printf("lat_max: %d\n", lat_metrics.lat_max);
         printf("lat_max_bias: %.6f\n", lat_metrics.lat_max_bias);
     }
 
     if (profile_timings) {
-        printf("component_fwht_ms: %.3f\n", comp_metrics.fwht_ms);
+        if (!lat_only) {
+            printf("component_fwht_ms: %.3f\n", comp_metrics.fwht_ms);
+        }
         if (have_lat_metrics) {
             printf("lat_column_ms: %.3f\n", lat_metrics.column_ms);
             printf("lat_fwht_ms: %.3f\n", lat_metrics.fwht_ms);
         }
     }
 
-    if (component_path && component_buf) {
+    if (!lat_only && component_path && component_buf) {
         if (write_component_file(component_path, component_buf, comp_metrics.n, comp_metrics.size) != 0) {
             fprintf(stderr, "Error: failed to write component spectra.\n");
             goto sbox_cleanup;
@@ -559,6 +576,7 @@ int main(int argc, char **argv) {
     const char* sbox_component_path = NULL;
     int sbox_lat_stats = 0;
     int sbox_profile = 0;
+    int sbox_lat_only = 0;
 
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
@@ -706,6 +724,8 @@ int main(int argc, char **argv) {
             sbox_lat_stats = 1;
         } else if (strcmp(arg, "--sbox-profile") == 0) {
             sbox_profile = 1;
+        } else if (strcmp(arg, "--sbox-lat-only") == 0) {
+            sbox_lat_only = 1;
         } else {
             fprintf(stderr, "Error: unknown argument '%s'.\n", arg);
             print_usage(argv[0]);
@@ -720,6 +740,20 @@ int main(int argc, char **argv) {
     if (batch_size == 0) {
         fprintf(stderr, "Error: --batch-size must be >= 1.\n");
         return 1;
+    }
+    if (sbox_lat_only) {
+        if (mode != MODE_SBOX) {
+            fprintf(stderr, "Error: --sbox-lat-only is only valid together with --sbox.\n");
+            return 1;
+        }
+        if (sbox_component_path) {
+            fprintf(stderr, "Error: --sbox-lat-only cannot be combined with --sbox-components.\n");
+            return 1;
+        }
+        if (!sbox_lat_path && !sbox_lat_stats) {
+            fprintf(stderr, "Error: --sbox-lat-only requires --sbox-lat or --sbox-lat-stats.\n");
+            return 1;
+        }
     }
     if (dtype == DTYPE_I32 && format == INPUT_FLOAT) {
         fprintf(stderr, "Error: floating input requires --dtype f64.\n");
@@ -737,6 +771,9 @@ int main(int argc, char **argv) {
     int32_t *i32_data = NULL;
     double *f64_data = NULL;
     int exit_code = 0;
+    uint64_t *packed_bits = NULL;
+    size_t packed_words = 0;
+    int pack_boolean_bits = 0;
 
     if (!input_path && !values_arg) {
         fprintf(stderr, "Reading values from stdin (Ctrl+D to finish).\n");
@@ -781,6 +818,17 @@ int main(int argc, char **argv) {
         goto cleanup;
     }
 
+    if (format == INPUT_BOOL && batch_size == 1) {
+        packed_words = (n + 63u) / 64u;
+        packed_bits = calloc(packed_words, sizeof(uint64_t));
+        if (!packed_bits) {
+            fprintf(stderr, "Error: memory allocation failed (%s).\n", strerror(errno));
+            exit_code = 1;
+            goto cleanup;
+        }
+        pack_boolean_bits = 1;
+    }
+
     if (mode == MODE_SBOX) {
         if (batch_size != 1) {
             fprintf(stderr, "Error: --sbox mode does not support batch processing.\n");
@@ -788,8 +836,9 @@ int main(int argc, char **argv) {
             goto cleanup;
         }
         exit_code = run_sbox_mode(&buffer, backend, quiet,
-                                   sbox_lat_path, sbox_component_path,
-                                   sbox_lat_stats, sbox_profile);
+                       sbox_lat_path, sbox_component_path,
+                       sbox_lat_stats, sbox_profile,
+                       sbox_lat_only);
         goto cleanup;
     }
 
@@ -809,7 +858,13 @@ int main(int argc, char **argv) {
         for (size_t i = 0; i < total; ++i) {
             double value = buffer.data[i];
             if (format == INPUT_BOOL) {
-                i32_data[i] = (value == 0.0) ? 1 : -1;
+                int bit = (value != 0.0);
+                if (pack_boolean_bits && bit) {
+                    size_t word_idx = i / 64u;
+                    size_t bit_idx = i % 64u;
+                    packed_bits[word_idx] |= (1ULL << bit_idx);
+                }
+                i32_data[i] = bit ? -1 : 1;
                 continue;
             }
             if (value < (double)INT32_MIN || value > (double)INT32_MAX) {
@@ -872,8 +927,31 @@ int main(int argc, char **argv) {
     fwht_status_t status = FWHT_SUCCESS;
     fwht_backend_t resolved_backend = backend;
     int used_gpu_backend = 0;
+    int used_bitpacked_gpu = 0;
 
-    if (batch_size > 1) {
+    if (pack_boolean_bits && dtype == DTYPE_I32 && packed_bits != NULL &&
+        n <= 65536 && backend != FWHT_BACKEND_CPU_SAFE) {
+#ifdef USE_CUDA
+        int gpu_available = fwht_has_gpu();
+#else
+        int gpu_available = 0;
+#endif
+        int want_gpu = (backend == FWHT_BACKEND_GPU) ||
+                       (backend == FWHT_BACKEND_AUTO && gpu_available);
+        if (want_gpu && gpu_available) {
+            status = fwht_boolean_packed_backend(packed_bits, i32_data, n, FWHT_BACKEND_GPU);
+            if (status != FWHT_SUCCESS) {
+                fprintf(stderr, "Error: bit-packed GPU backend failed (%s).\n", fwht_error_string(status));
+                exit_code = 1;
+                goto cleanup;
+            }
+            resolved_backend = FWHT_BACKEND_GPU;
+            used_gpu_backend = 1;
+            used_bitpacked_gpu = 1;
+        }
+    }
+
+    if (!used_bitpacked_gpu && batch_size > 1) {
         if (dtype == DTYPE_I32) {
             status = run_batch_i32(i32_data, n, batch_size, backend, &resolved_backend,
                                    &used_gpu_backend);
@@ -881,7 +959,7 @@ int main(int argc, char **argv) {
             status = run_batch_f64(f64_data, n, batch_size, backend, &resolved_backend,
                                    &used_gpu_backend);
         }
-    } else {
+    } else if (!used_bitpacked_gpu) {
         if (dtype == DTYPE_I32) {
             if (backend == FWHT_BACKEND_AUTO) {
                 status = fwht_i32(i32_data, n);
@@ -964,5 +1042,6 @@ cleanup:
     free(buffer.data);
     free(i32_data);
     free(f64_data);
+    free(packed_bits);
     return exit_code;
 }

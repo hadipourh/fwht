@@ -255,6 +255,7 @@ static fwht_status_t fwht_sbox_gpu_process_lat_batch(const uint32_t* table,
     cudaEvent_t evt_columns_start = NULL;
     cudaEvent_t evt_columns_end = NULL;
     cudaEvent_t evt_fwht_end = NULL;
+    cudaError_t err = cudaSuccess;
     if (profile_timings) {
         cudaEventCreateWithFlags(&evt_columns_start, cudaEventDefault);
         cudaEventCreateWithFlags(&evt_columns_end, cudaEventDefault);
@@ -290,11 +291,11 @@ static fwht_status_t fwht_sbox_gpu_process_lat_batch(const uint32_t* table,
         cudaEventRecord(evt_fwht_end, g_sbox_gpu_ws.stream);
     }
 
-    cudaError_t err = cudaMemcpyAsync(host_buffer,
-                                      g_sbox_gpu_ws.d_lat_columns,
-                                      size * mask_count * sizeof(int32_t),
-                                      cudaMemcpyDeviceToHost,
-                                      g_sbox_gpu_ws.stream);
+    err = cudaMemcpyAsync(host_buffer,
+                          g_sbox_gpu_ws.d_lat_columns,
+                          size * mask_count * sizeof(int32_t),
+                          cudaMemcpyDeviceToHost,
+                          g_sbox_gpu_ws.stream);
     if (err != cudaSuccess) {
         status = fwht_sbox_gpu_status(err, "cudaMemcpyAsync(lat D2H)");
         goto lat_gpu_cleanup;
@@ -655,6 +656,9 @@ fwht_status_t fwht_sbox_analyze_lat(const uint32_t* table,
         }
     }
 
+    const size_t lat_stride = lat_cols;
+    int32_t lat_max_abs = 0;
+
 #ifdef USE_CUDA
     const bool prefer_gpu_backend = (backend == FWHT_BACKEND_GPU);
     bool lat_use_gpu_columns = prefer_gpu_backend;
@@ -759,9 +763,6 @@ fwht_status_t fwht_sbox_analyze_lat(const uint32_t* table,
     }
 #endif
 
-    const size_t lat_stride = lat_cols;
-    int32_t lat_max_abs = 0;
-
     for (size_t base = 0; base < lat_cols; base += lat_batch_capacity) {
         size_t current = lat_batch_capacity;
         if (base + current > lat_cols) {
@@ -822,6 +823,13 @@ fwht_status_t fwht_sbox_analyze_lat(const uint32_t* table,
             int32_t* column_data = lat_batch_ptrs[col];
             for (size_t row = 0; row < shape.size; ++row) {
                 int32_t value = column_data[row];
+                /* Exclude LAT[0,0] from max computation (always trivial maximum) */
+                if (row == 0 && mask == 0) {
+                    if (lat_output != NULL) {
+                        lat_output[row * lat_stride + mask] = value;
+                    }
+                    continue;
+                }
                 int32_t abs_val = fwht_i32_abs(value);
                 if (abs_val > lat_max_abs) {
                     lat_max_abs = abs_val;

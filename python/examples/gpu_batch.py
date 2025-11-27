@@ -31,20 +31,20 @@ def main():
     # In-place batch transform
     fwht.gpu.batch_transform_i32(batch_i32)
     metrics = fwht.gpu.get_last_metrics()
-    print(f"Batch i32 kernel: {metrics.kernel_ms:.3f} ms (n={metrics.n}, batch={metrics.batch_size})")
+    print(f"Batch i32 kernel: {metrics['kernel_ms']:.3f} ms (n={metrics['n']}, batch={metrics['batch_size']})")
 
     # Float64 batch
     batch_f64 = np.random.randn(4, 512).astype(np.float64)
     fwht.gpu.batch_transform_f64(batch_f64)
     metrics = fwht.gpu.get_last_metrics()
-    print(f"Batch f64 kernel: {metrics.kernel_ms:.3f} ms (n={metrics.n}, batch={metrics.batch_size})")
+    print(f"Batch f64 kernel: {metrics['kernel_ms']:.3f} ms (n={metrics['n']}, batch={metrics['batch_size']})")
 
     # Persistent context
     with fwht.gpu.Context(max_n=512, batch_size=8) as ctx:
         vec = np.random.randn(512).astype(np.float64)
         ctx.transform_f64(vec)
         metrics = fwht.gpu.get_last_metrics()
-        print(f"Context f64 kernel: {metrics.kernel_ms:.3f} ms")
+        print(f"Context f64 kernel: {metrics['kernel_ms']:.3f} ms")
 
     # Reset profiling
     fwht.gpu.set_profiling(False)

@@ -29,6 +29,7 @@
 #endif
 
 #include "fwht.h"
+#include "fwht_internal.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -1216,8 +1217,7 @@ fwht_status_t fwht_boolean_packed_backend(const uint64_t* packed_bits, int32_t* 
     /* For now, only CPU backend is implemented */
     if (backend == FWHT_BACKEND_GPU) {
 #ifdef USE_CUDA
-        /* TODO: Implement GPU bit-sliced kernel */
-        return FWHT_ERROR_BACKEND_UNAVAILABLE;
+    return fwht_boolean_packed_cuda(packed_bits, wht_out, n);
 #else
         return FWHT_ERROR_BACKEND_UNAVAILABLE;
 #endif

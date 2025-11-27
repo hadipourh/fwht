@@ -32,7 +32,10 @@ extern "C" {
 }
 #endif
 
+#include <climits>
+#include <cstring>
 #include <cstdlib>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -64,6 +67,29 @@ static void check_status(fwht_status_t status, const char* operation) {
             throw std::runtime_error(full_msg);
     }
 }
+
+static size_t infer_sbox_output_bits(const uint32_t* table, size_t size) {
+    if (size == 0) {
+        throw std::invalid_argument("S-box table must have at least one entry");
+    }
+    uint32_t max_value = 0;
+    for (size_t i = 0; i < size; ++i) {
+        if (table[i] > max_value) {
+            max_value = table[i];
+        }
+    }
+    if (max_value == 0) {
+        return 1;  // Constant output still treated as 1-bit function
+    }
+    size_t bits = 0;
+    uint32_t temp = max_value;
+    while (temp > 0) {
+        ++bits;
+        temp >>= 1;
+    }
+    return bits;
+}
+
 
 // =============================================================================
 // CORE TRANSFORMS - IN-PLACE
@@ -472,6 +498,131 @@ py::list py_fwht_boolean_batch(py::list packed_list, size_t n) {
     }
     
     return result;
+}
+
+// =============================================================================
+// S-BOX ANALYSIS API
+// =============================================================================
+
+py::tuple py_fwht_sbox_analyze_components(py::array_t<uint32_t, py::array::c_style | py::array::forcecast> table,
+                                          fwht_backend_t backend,
+                                          bool profile_timings,
+                                          bool return_spectra) {
+    auto buf = table.request();
+    if (buf.ndim != 1) {
+        throw std::invalid_argument("S-box table must be 1-dimensional");
+    }
+
+    size_t size = static_cast<size_t>(buf.shape[0]);
+    if (size == 0) {
+        throw std::invalid_argument("S-box table cannot be empty");
+    }
+    if (!fwht_is_power_of_2(size)) {
+        throw std::invalid_argument("S-box size must be a power of two");
+    }
+
+    const uint32_t* table_ptr = static_cast<const uint32_t*>(buf.ptr);
+
+    fwht_sbox_component_request_t request;
+    std::memset(&request, 0, sizeof(request));
+    request.backend = backend;
+    request.profile_timings = profile_timings;
+
+    py::array_t<int32_t> spectra_array;
+    bool have_spectra = false;
+    if (return_spectra) {
+        size_t n_bits = infer_sbox_output_bits(table_ptr, size);
+        if (n_bits != 0 && size > std::numeric_limits<size_t>::max() / n_bits) {
+            throw std::overflow_error("Component buffer would overflow");
+        }
+        py::ssize_t rows = static_cast<py::ssize_t>(n_bits);
+        py::ssize_t cols = static_cast<py::ssize_t>(size);
+        spectra_array = py::array_t<int32_t>({rows, cols});
+        auto spectra_buf = spectra_array.request();
+        request.spectra = static_cast<int32_t*>(spectra_buf.ptr);
+        have_spectra = true;
+    }
+
+    fwht_sbox_component_metrics_t metrics;
+    fwht_status_t status = fwht_sbox_analyze_components(table_ptr, size, &request, &metrics);
+    check_status(status, "fwht_sbox_analyze_components");
+
+    py::dict metrics_dict;
+    metrics_dict["m_bits"] = metrics.m;
+    metrics_dict["n_bits"] = metrics.n;
+    metrics_dict["size"] = metrics.size;
+    metrics_dict["max_walsh"] = metrics.max_walsh;
+    metrics_dict["min_nonlinearity"] = metrics.min_nonlinearity;
+    metrics_dict["fwht_ms"] = metrics.fwht_ms;
+
+    if (have_spectra) {
+        return py::make_tuple(metrics_dict, spectra_array);
+    }
+    return py::make_tuple(metrics_dict, py::none());
+}
+
+py::tuple py_fwht_sbox_analyze_lat(py::array_t<uint32_t, py::array::c_style | py::array::forcecast> table,
+                                   fwht_backend_t backend,
+                                   bool profile_timings,
+                                   bool return_lat) {
+    auto buf = table.request();
+    if (buf.ndim != 1) {
+        throw std::invalid_argument("S-box table must be 1-dimensional");
+    }
+
+    size_t size = static_cast<size_t>(buf.shape[0]);
+    if (size == 0) {
+        throw std::invalid_argument("S-box table cannot be empty");
+    }
+    if (!fwht_is_power_of_2(size)) {
+        throw std::invalid_argument("S-box size must be a power of two");
+    }
+
+    const uint32_t* table_ptr = static_cast<const uint32_t*>(buf.ptr);
+
+    fwht_sbox_lat_request_t request;
+    std::memset(&request, 0, sizeof(request));
+    request.backend = backend;
+    request.profile_timings = profile_timings;
+
+    py::array_t<int32_t> lat_array;
+    bool have_lat = false;
+    size_t n_bits = 0;
+    if (return_lat) {
+        n_bits = infer_sbox_output_bits(table_ptr, size);
+        size_t max_bits = sizeof(size_t) * CHAR_BIT;
+        if (n_bits >= max_bits) {
+            throw std::invalid_argument("LAT output requires n < sizeof(size_t)*CHAR_BIT");
+        }
+        size_t lat_cols = static_cast<size_t>(1) << n_bits;
+        if (lat_cols != 0 && size > std::numeric_limits<size_t>::max() / lat_cols) {
+            throw std::overflow_error("LAT buffer would overflow");
+        }
+        py::ssize_t rows = static_cast<py::ssize_t>(size);
+        py::ssize_t cols = static_cast<py::ssize_t>(lat_cols);
+        lat_array = py::array_t<int32_t>({rows, cols});
+        auto lat_buf = lat_array.request();
+        request.lat = static_cast<int32_t*>(lat_buf.ptr);
+        have_lat = true;
+    }
+
+    fwht_sbox_lat_metrics_t metrics;
+    fwht_status_t status = fwht_sbox_analyze_lat(table_ptr, size, &request, &metrics);
+    check_status(status, "fwht_sbox_analyze_lat");
+
+    py::dict metrics_dict;
+    metrics_dict["m_bits"] = metrics.m;
+    metrics_dict["n_bits"] = metrics.n;
+    metrics_dict["size"] = metrics.size;
+    metrics_dict["lat_max"] = metrics.lat_max;
+    metrics_dict["lat_max_bias"] = metrics.lat_max_bias;
+    metrics_dict["column_ms"] = metrics.column_ms;
+    metrics_dict["fwht_ms"] = metrics.fwht_ms;
+
+    if (have_lat) {
+        return py::make_tuple(metrics_dict, lat_array);
+    }
+    return py::make_tuple(metrics_dict, py::none());
 }
 
 // =============================================================================
@@ -1043,6 +1194,32 @@ PYBIND11_MODULE(_pyfwht, m) {
     m.def("fwht_boolean_batch", &py_fwht_boolean_batch,
           py::arg("packed_list"), py::arg("n"),
           "Batch WHT for list of bit-packed Boolean functions (S-box cryptanalysis)");
+
+        m.def("sbox_analyze_components", &py_fwht_sbox_analyze_components,
+                    py::arg("table"),
+                    py::arg("backend") = FWHT_BACKEND_AUTO,
+                    py::arg("profile_timings") = false,
+                    py::arg("return_spectra") = false,
+                    R"pbdoc(Analyze Boolean components of a vectorial S-box.
+
+Returns a tuple (metrics, spectra) where metrics is a dict containing:
+    m_bits, n_bits, size, max_walsh, min_nonlinearity, fwht_ms.
+
+If return_spectra=True, spectra is a NumPy array shaped (n_bits, size)
+holding the Walsh spectra of each component; otherwise None.)pbdoc");
+
+        m.def("sbox_analyze_lat", &py_fwht_sbox_analyze_lat,
+                    py::arg("table"),
+                    py::arg("backend") = FWHT_BACKEND_AUTO,
+                    py::arg("profile_timings") = false,
+                    py::arg("return_lat") = false,
+                    R"pbdoc(Analyze the linear approximation table (LAT) of an S-box.
+
+Returns a tuple (metrics, lat) where metrics is a dict with keys:
+    m_bits, n_bits, size, lat_max, lat_max_bias, column_ms, fwht_ms.
+
+If return_lat=True, lat is a NumPy array shaped (size, 2**n_bits)
+with the entire LAT; otherwise None.)pbdoc");
     
     // Context API
     py::class_<PyFWHTContext>(m, "Context", "FWHT computation context for repeated calls")

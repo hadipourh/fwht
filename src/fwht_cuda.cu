@@ -273,6 +273,43 @@ static unsigned int fwht_cuda_max_grid_x(void) {
     } \
 } while(0)
 
+#define CUDA_CHECK_STATUS(call) do { \
+    cudaError_t err__ = (call); \
+    if (err__ != cudaSuccess) { \
+        status = fwht_cuda_report(err__, __FILE__, __LINE__); \
+        goto cleanup; \
+    } \
+} while(0)
+
+/* ==========================================================================
+ * BOOLEAN UNPACK KERNEL
+ * ==========================================================================
+ * Converts bit-packed Boolean functions (0/1) into ±1 int32 representation on
+ * the GPU so we can reuse the high-performance int32 FWHT kernels without
+ * inflating host/device transfer size.
+ */
+__global__ void fwht_boolean_unpack_kernel(const uint64_t* __restrict__ packed_bits,
+                                           int32_t* __restrict__ dst,
+                                           size_t n,
+                                           size_t word_count) {
+    size_t word_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t stride = static_cast<size_t>(blockDim.x) * gridDim.x;
+    while (word_idx < word_count) {
+        const uint64_t word = packed_bits[word_idx];
+        const size_t base = word_idx * 64u;
+#pragma unroll
+        for (int bit = 0; bit < 64; ++bit) {
+            const size_t idx = base + static_cast<size_t>(bit);
+            if (idx >= n) {
+                break;
+            }
+            const int bit_val = (word >> bit) & 1u;
+            dst[idx] = bit_val ? -1 : 1;
+        }
+        word_idx += stride;
+    }
+}
+
 /* ============================================================================
  * GPU LOAD/STORE CALLBACK KERNELS
  * ============================================================================ */
@@ -1871,9 +1908,361 @@ fwht_status_t fwht_batch_f64_cuda_device(double* d_data, size_t n, size_t batch_
     return fwht_execute_cuda_device<double>(d_data, n, batch_size);
 }
 
+/* Forward declaration: implemented after the Boolean context definition */
+static fwht_gpu_boolean_context_t* fwht_boolean_get_or_create_context(size_t min_n);
+
+static fwht_status_t fwht_boolean_packed_cuda_legacy(const uint64_t* packed_bits,
+                                                     int32_t* wht_out,
+                                                     size_t n) {
+    if (packed_bits == NULL || wht_out == NULL) {
+        return FWHT_ERROR_NULL_POINTER;
+    }
+    if (!is_power_of_2(n) || n == 0 || n > 65536) {
+        return FWHT_ERROR_INVALID_SIZE;
+    }
+
+    fwht_status_t status = FWHT_SUCCESS;
+    const size_t word_count = (n + 63u) / 64u;
+    const size_t bits_bytes = word_count * sizeof(uint64_t);
+    const size_t data_bytes = n * sizeof(int32_t);
+
+    uint64_t* d_bits = NULL;
+    int32_t* d_data = NULL;
+    const unsigned int threads = 256u;
+    unsigned int blocks = 0u;
+    cudaError_t kernel_err = cudaSuccess;
+
+    CUDA_CHECK_STATUS(cudaMalloc((void**)&d_bits, bits_bytes));
+    CUDA_CHECK_STATUS(cudaMalloc((void**)&d_data, data_bytes));
+    CUDA_CHECK_STATUS(cudaMemcpy(d_bits,
+                                 packed_bits,
+                                 bits_bytes,
+                                 cudaMemcpyHostToDevice));
+
+    blocks = static_cast<unsigned int>((word_count + threads - 1u) / threads);
+    if (blocks == 0) {
+        blocks = 1;
+    }
+    blocks = std::min(blocks, CUDA_BATCH_LIMIT);
+
+    fwht_boolean_unpack_kernel<<<blocks, threads>>>(d_bits, d_data, n, word_count);
+    kernel_err = cudaGetLastError();
+    if (kernel_err != cudaSuccess) {
+        status = fwht_cuda_report(kernel_err, __FILE__, __LINE__);
+        goto cleanup;
+    }
+    CUDA_CHECK_STATUS(cudaDeviceSynchronize());
+
+    status = fwht_batch_i32_cuda_device(d_data, n, 1);
+    if (status != FWHT_SUCCESS) {
+        goto cleanup;
+    }
+
+    CUDA_CHECK_STATUS(cudaMemcpy(wht_out,
+                                 d_data,
+                                 data_bytes,
+                                 cudaMemcpyDeviceToHost));
+
+cleanup:
+    if (d_bits) {
+        cudaFree(d_bits);
+    }
+    if (d_data) {
+        cudaFree(d_data);
+    }
+    return status;
+}
+
+fwht_status_t fwht_boolean_packed_cuda(const uint64_t* packed_bits,
+                                       int32_t* wht_out,
+                                       size_t n) {
+    if (packed_bits == NULL || wht_out == NULL) {
+        return FWHT_ERROR_NULL_POINTER;
+    }
+    if (!is_power_of_2(n) || n == 0 || n > 65536) {
+        return FWHT_ERROR_INVALID_SIZE;
+    }
+
+    fwht_status_t status = fwht_cuda_ensure_device_state();
+    if (status != FWHT_SUCCESS) {
+        return status;
+    }
+
+    fwht_gpu_boolean_context_t* ctx = fwht_boolean_get_or_create_context(n);
+    if (ctx != NULL) {
+        status = fwht_gpu_boolean_context_compute(ctx, packed_bits, wht_out, n);
+        if (status != FWHT_ERROR_OUT_OF_MEMORY) {
+            return status;
+        }
+    }
+
+    return fwht_boolean_packed_cuda_legacy(packed_bits, wht_out, n);
+}
+
 #ifdef __cplusplus
 }
 #endif
+
+/* =========================================================================
+ * BIT-PACKED BOOLEAN GPU CONTEXT (PERSISTENT DEVICE BUFFERS)
+ * ========================================================================= */
+
+struct fwht_gpu_boolean_context {
+    uint64_t* d_packed_bits;   /* Device buffer for packed Boolean words */
+    int32_t* d_walsh;          /* Device buffer for ±1 spectrum */
+    size_t max_n;              /* Maximum transform size supported */
+    size_t max_word_count;     /* Cached word count for max_n */
+    cudaStream_t stream;       /* Dedicated stream (optional) */
+    bool stream_created;       /* Tracks whether stream is valid */
+};
+
+static fwht_gpu_boolean_context_t* g_fwht_boolean_context = NULL;
+
+fwht_gpu_boolean_context_t* fwht_gpu_boolean_context_create(size_t max_n) {
+    if (max_n == 0 || !is_power_of_2(max_n) || max_n > 65536) {
+        return NULL;
+    }
+
+    fwht_status_t status = fwht_cuda_ensure_device_state();
+    if (status != FWHT_SUCCESS) {
+        return NULL;
+    }
+
+    fwht_gpu_boolean_context_t* ctx =
+        (fwht_gpu_boolean_context_t*)malloc(sizeof(fwht_gpu_boolean_context_t));
+    if (ctx == NULL) {
+        return NULL;
+    }
+
+    ctx->d_packed_bits = NULL;
+    ctx->d_walsh = NULL;
+    ctx->max_n = max_n;
+    ctx->max_word_count = (max_n + 63u) / 64u;
+    ctx->stream = NULL;
+    ctx->stream_created = false;
+
+    size_t bits_bytes = ctx->max_word_count * sizeof(uint64_t);
+    size_t data_bytes = max_n * sizeof(int32_t);
+
+    cudaError_t err = cudaMalloc((void**)&ctx->d_packed_bits, bits_bytes);
+    if (err != cudaSuccess) {
+        fprintf(stderr,
+                "Failed to allocate GPU memory for Boolean bits: %s\n",
+                cudaGetErrorString(err));
+        free(ctx);
+        return NULL;
+    }
+
+    err = cudaMalloc((void**)&ctx->d_walsh, data_bytes);
+    if (err != cudaSuccess) {
+        fprintf(stderr,
+                "Failed to allocate GPU memory for Boolean spectrum: %s\n",
+                cudaGetErrorString(err));
+        cudaFree(ctx->d_packed_bits);
+        free(ctx);
+        return NULL;
+    }
+
+    err = cudaStreamCreateWithFlags(&ctx->stream, cudaStreamNonBlocking);
+    if (err == cudaSuccess) {
+        ctx->stream_created = true;
+    } else {
+        ctx->stream = NULL;
+        ctx->stream_created = false;
+        (void)cudaGetLastError();
+    }
+
+    return ctx;
+}
+
+void fwht_gpu_boolean_context_destroy(fwht_gpu_boolean_context_t* ctx) {
+    if (ctx == NULL) {
+        return;
+    }
+
+    if (ctx->stream_created && ctx->stream != NULL) {
+        cudaStreamSynchronize(ctx->stream);
+        cudaStreamDestroy(ctx->stream);
+    }
+
+    if (ctx->d_packed_bits != NULL) {
+        cudaFree(ctx->d_packed_bits);
+    }
+    if (ctx->d_walsh != NULL) {
+        cudaFree(ctx->d_walsh);
+    }
+
+    free(ctx);
+}
+
+fwht_status_t fwht_gpu_boolean_context_compute(fwht_gpu_boolean_context_t* ctx,
+                                               const uint64_t* packed_bits,
+                                               int32_t* wht_out,
+                                               size_t n) {
+    if (ctx == NULL || packed_bits == NULL || wht_out == NULL) {
+        return FWHT_ERROR_NULL_POINTER;
+    }
+    if (!is_power_of_2(n) || n == 0 || n > 65536) {
+        return FWHT_ERROR_INVALID_SIZE;
+    }
+    if (n > ctx->max_n) {
+        return FWHT_ERROR_INVALID_ARGUMENT;
+    }
+
+    const size_t word_count = (n + 63u) / 64u;
+    const size_t bits_bytes = word_count * sizeof(uint64_t);
+    const size_t data_bytes = n * sizeof(int32_t);
+    if (word_count > ctx->max_word_count) {
+        return FWHT_ERROR_INVALID_ARGUMENT;
+    }
+    const unsigned int threads = 256u;
+    unsigned int blocks = static_cast<unsigned int>((word_count + threads - 1u) / threads);
+    if (blocks == 0) {
+        blocks = 1u;
+    }
+    blocks = std::min(blocks, CUDA_BATCH_LIMIT);
+
+    cudaStream_t stream = ctx->stream_created ? ctx->stream : 0;
+    bool profiling = g_fwht_profiling_enabled;
+    cudaEvent_t evt_h2d_start = NULL;
+    cudaEvent_t evt_h2d_end = NULL;
+    cudaEvent_t evt_kernel_end = NULL;
+    cudaEvent_t evt_d2h_end = NULL;
+
+    if (profiling) {
+        if (cudaEventCreateWithFlags(&evt_h2d_start, cudaEventDefault) != cudaSuccess ||
+            cudaEventCreateWithFlags(&evt_h2d_end, cudaEventDefault) != cudaSuccess ||
+            cudaEventCreateWithFlags(&evt_kernel_end, cudaEventDefault) != cudaSuccess ||
+            cudaEventCreateWithFlags(&evt_d2h_end, cudaEventDefault) != cudaSuccess) {
+            profiling = false;
+            if (evt_h2d_start) cudaEventDestroy(evt_h2d_start);
+            if (evt_h2d_end) cudaEventDestroy(evt_h2d_end);
+            if (evt_kernel_end) cudaEventDestroy(evt_kernel_end);
+            if (evt_d2h_end) cudaEventDestroy(evt_d2h_end);
+            evt_h2d_start = evt_h2d_end = evt_kernel_end = evt_d2h_end = NULL;
+        }
+    }
+
+    fwht_status_t status = FWHT_SUCCESS;
+    cudaError_t err;
+
+    if (profiling) {
+        (void)cudaEventRecord(evt_h2d_start, stream);
+    }
+    err = cudaMemcpyAsync(ctx->d_packed_bits,
+                          packed_bits,
+                          bits_bytes,
+                          cudaMemcpyHostToDevice,
+                          stream);
+    if (err != cudaSuccess) {
+        status = fwht_cuda_report(err, __FILE__, __LINE__);
+        goto cleanup;
+    }
+    if (profiling) {
+        (void)cudaEventRecord(evt_h2d_end, stream);
+    }
+
+    fwht_boolean_unpack_kernel<<<blocks, threads, 0, stream>>>(ctx->d_packed_bits,
+                                                               ctx->d_walsh,
+                                                               n,
+                                                               word_count);
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        status = fwht_cuda_report(err, __FILE__, __LINE__);
+        goto cleanup;
+    }
+
+    status = fwht_batch_i32_cuda_device_async(ctx->d_walsh, n, 1, stream);
+    if (status != FWHT_SUCCESS) {
+        goto cleanup;
+    }
+
+    if (profiling) {
+        (void)cudaEventRecord(evt_kernel_end, stream);
+    }
+
+    err = cudaMemcpyAsync(wht_out,
+                          ctx->d_walsh,
+                          data_bytes,
+                          cudaMemcpyDeviceToHost,
+                          stream);
+    if (err != cudaSuccess) {
+        status = fwht_cuda_report(err, __FILE__, __LINE__);
+        goto cleanup;
+    }
+
+    if (profiling) {
+        (void)cudaEventRecord(evt_d2h_end, stream);
+    }
+
+    err = cudaStreamSynchronize(stream);
+    if (err != cudaSuccess) {
+        status = fwht_cuda_report(err, __FILE__, __LINE__);
+        goto cleanup;
+    }
+
+    if (profiling) {
+        float h2d_ms = 0.0f;
+        float kernel_ms = 0.0f;
+        float d2h_ms = 0.0f;
+        cudaEventElapsedTime(&h2d_ms, evt_h2d_start, evt_h2d_end);
+        cudaEventElapsedTime(&kernel_ms, evt_h2d_end, evt_kernel_end);
+        cudaEventElapsedTime(&d2h_ms, evt_kernel_end, evt_d2h_end);
+        g_fwht_last_metrics.h2d_ms = static_cast<double>(h2d_ms);
+        g_fwht_last_metrics.kernel_ms = static_cast<double>(kernel_ms);
+        g_fwht_last_metrics.d2h_ms = static_cast<double>(d2h_ms);
+        g_fwht_last_metrics.n = n;
+        g_fwht_last_metrics.batch_size = 1;
+        g_fwht_last_metrics.bytes_transferred = bits_bytes + data_bytes;
+        g_fwht_last_metrics.samples = 1;
+        g_fwht_last_metrics.valid = true;
+    }
+
+cleanup:
+    if (profiling) {
+        if (evt_h2d_start) cudaEventDestroy(evt_h2d_start);
+        if (evt_h2d_end) cudaEventDestroy(evt_h2d_end);
+        if (evt_kernel_end) cudaEventDestroy(evt_kernel_end);
+        if (evt_d2h_end) cudaEventDestroy(evt_d2h_end);
+    }
+
+    if (status != FWHT_SUCCESS) {
+        g_fwht_last_metrics.valid = false;
+        g_fwht_last_metrics.samples = 0;
+    }
+
+    return status;
+}
+
+static fwht_gpu_boolean_context_t* fwht_boolean_get_or_create_context(size_t min_n) {
+    if (min_n == 0 || min_n > 65536u) {
+        return NULL;
+    }
+
+    if (g_fwht_boolean_context != NULL && g_fwht_boolean_context->max_n >= min_n) {
+        return g_fwht_boolean_context;
+    }
+
+    const size_t kBooleanCtxMinN = 1024u;
+    size_t target_n = min_n;
+    if (target_n < kBooleanCtxMinN) {
+        target_n = kBooleanCtxMinN;
+    }
+    if (target_n > 65536u) {
+        target_n = 65536u;
+    }
+
+    fwht_gpu_boolean_context_t* new_ctx = fwht_gpu_boolean_context_create(target_n);
+    if (new_ctx == NULL) {
+        return NULL;
+    }
+
+    if (g_fwht_boolean_context != NULL) {
+        fwht_gpu_boolean_context_destroy(g_fwht_boolean_context);
+    }
+    g_fwht_boolean_context = new_ctx;
+    return g_fwht_boolean_context;
+}
 
 /* ============================================================================
  * PERSISTENT GPU CONTEXT API
@@ -2428,7 +2817,10 @@ extern "C" {
 int fwht_batch_f16_cuda_device_fallback(const void* d_in, void* d_out, 
                                 unsigned int n, unsigned int batch_size) {
     if (!g_cuda_device_state.initialized) {
-        return -3;
+        fwht_status_t init_status = fwht_cuda_ensure_device_state();
+        if (init_status != FWHT_SUCCESS) {
+            return -3;
+        }
     }
     
     if (d_in == NULL || d_out == NULL) {
@@ -2484,7 +2876,10 @@ int fwht_batch_f16_cuda_device_fallback(const void* d_in, void* d_out,
 int fwht_batch_f16_cuda_device(const void* d_in, void* d_out, 
                                 unsigned int n, unsigned int batch_size) {
     if (!g_cuda_device_state.initialized) {
-        return -3;
+        fwht_status_t init_status = fwht_cuda_ensure_device_state();
+        if (init_status != FWHT_SUCCESS) {
+            return -3;
+        }
     }
     
     if (d_in == NULL || d_out == NULL) {
