@@ -8,9 +8,9 @@
  */
 
 extern "C" {
-    // Include C implementation files from parent src/ directory
-    #include "../../src/fwht_core.c"
-    #include "../../src/fwht_backend.c"
-    #include "../../src/fwht_batch.c"
-    #include "../../src/fwht_sbox.c"
+    // C implementation files are provided via the compiler's include path
+    #include "fwht_core.c"
+    #include "fwht_backend.c"
+    #include "fwht_batch.c"
+    #include "fwht_sbox.c"
 }
