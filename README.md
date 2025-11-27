@@ -20,9 +20,11 @@ High-performance C99 library for computing the Fast Walsh-Hadamard Transform (FW
   - GPU: Up to **1115 GOps/s** on RTX 4090 (fp16 Tensor Cores with PyTorch DLPack)
   - Persistent GPU contexts eliminate malloc/free overhead (5-10× speedup)
 - **Vectorized Batch Processing**: SIMD-accelerated batch API processes multiple transforms simultaneously (ideal for cryptanalysis)
-- **Bit-packed Boolean WHT**: High-level API to compute WHT from 1-bit packed truth tables (32× memory savings)
+- **Bit-packed Boolean WHT**: High-level API to compute WHT from 1-bit packed truth tables (32× memory savings) with CUDA support for n ≤ 64K
+- **Boolean GPU contexts**: `fwht_gpu_boolean_context_{create,compute,destroy}` keep packed truth tables on device so repeated S-box transforms skip PCIe transfers and `cudaMalloc`
 - **Overflow Safety**: Optional runtime overflow detection for int32 transforms with `fwht_i32_safe()`
 - **Flexible API**: In-place transforms, out-of-place helpers, batch processing, Boolean function utilities, device-pointer APIs
+- **Bit-packed Boolean GPU path**: `fwht_boolean_packed_backend(..., FWHT_BACKEND_GPU)` keeps inputs packed over PCIe and expands to ±1 on device for `n ≤ 64K`
 - **Production Ready**: Comprehensive test suite, numerical stability guarantees, precision warnings, command-line tool included
 - **Easy Integration**: C99 standard, minimal dependencies, Python bindings available via PyPI with DLPack support
 
@@ -82,7 +84,7 @@ Compile with `gcc example.c -lfwht -lm` (or link directly against `libfwht.a` in
 - `fwht_f64`: in-place transform for `double` data when fractional coefficients matter
   - Relative error typically `< log₂(n) × 2.22e-16` (e.g., `< 2e-15` for n=2^20)
 - `fwht_i8`: in-place transform for `int8_t` data to minimize memory footprint
-- `fwht_boolean_packed`: compute WHT directly from a bit-packed Boolean truth table (`uint64` words); ideal for S-box analysis
+- `fwht_boolean_packed`: compute WHT directly from a bit-packed Boolean truth table (`uint64` words); ideal for S-box analysis and now GPU-accelerated via `fwht_boolean_packed_backend(..., FWHT_BACKEND_GPU)` for `n ≤ 65536`
 - `fwht_boolean_batch`: batch processing of multiple bit-packed Boolean functions (vectorial S-box components)
   - **Note:** Only safe for `n ≤ 64` with `|input| = 1` (watch for overflow)
 - `fwht_i32_backend`, `fwht_f64_backend`: same transforms with explicit backend selection (`AUTO`, `CPU`, `CPU_SAFE`, `OPENMP`, `GPU`)
@@ -158,6 +160,20 @@ fwht_gpu_context_destroy(ctx);
 #endif
 ```
 
+#### Bit-packed Boolean GPU Context
+
+Boolean workflows now have their own lightweight context that keeps the packed bitset and ±1 buffer resident on the device. It mirrors the floating-point context but fixes the batch size at 1 and caps the transform at 64K so the unpack kernel can stay in shared memory.
+
+```c
+#ifdef USE_CUDA
+fwht_gpu_boolean_context_t* bctx = fwht_gpu_boolean_context_create(32768);
+fwht_status_t st = fwht_gpu_boolean_context_compute(bctx, packed_bits, spectrum, 32768);
+fwht_gpu_boolean_context_destroy(bctx);
+#endif
+```
+
+`fwht_boolean_packed_backend(..., FWHT_BACKEND_GPU)` uses a shared singleton of this context behind the scenes, so existing call sites automatically skip repeated `cudaMalloc`/`cudaMemcpy` traffic and see the same 5–10× reduction in overhead as the float/int context API. Use the explicit context when you need deterministic lifetime control or multiple concurrent contexts per device.
+
 **Performance benefit**: 5-10× speedup for cryptanalysis workloads with many small transforms.
 
 ### GPU Configuration and Tuning
@@ -231,6 +247,29 @@ fwht_status_t st = fwht_boolean_packed(&packed, wht, 8);
 
 See `examples/example_boolean_packed.c` for a complete sample, including packing helpers and verification against the unpacked API.
 
+CLI tip: when you pass Boolean input (`--input-format bool`, the default) and request `--backend gpu` with `n ≤ 65536`, the command-line tool keeps the bitset packed over PCIe and unpacks directly on the CUDA device before calling `fwht_boolean_packed_backend`.
+
+Need to amortize many Boolean GPU calls yourself? Create a dedicated context so both the packed bits and the ±1 buffer stay allocated between calls:
+
+```c
+#ifdef USE_CUDA
+fwht_gpu_boolean_context_t* bctx = fwht_gpu_boolean_context_create(65536);
+for (int iter = 0; iter < 1000; ++iter) {
+  fwht_status_t st = fwht_gpu_boolean_context_compute(bctx,
+                            packed_truth_tables[iter],
+                            spectra[iter],
+                            65536);
+  if (st != FWHT_SUCCESS) {
+    fprintf(stderr, "Boolean GPU context failed: %s\n", fwht_error_string(st));
+    break;
+  }
+}
+fwht_gpu_boolean_context_destroy(bctx);
+#endif
+```
+
+The CLI and new `tests/compare_sboxu_fwht` benchmark automatically use this context to report CPU, GPU-unpacked, and GPU-packed timings side by side for S-box workflows.
+
 ## Python Package
 
 Python bindings are available via PyPI for seamless NumPy integration:
@@ -300,7 +339,7 @@ Key options:
 - `--dtype i32|f64`: select integer or double-precision transforms (`i32` is default)
 - `--batch-size <n>`: treat the stream as `n` independent transforms (must divide the total length)
 - `--input-format bool|signed|float`: support Boolean truth tables, signed ints, or floating spectra (float requires `--dtype f64`)
-- `--backend auto|cpu|cpu-safe|openmp|gpu`: choose execution backend (default `auto`)
+- `--backend auto|cpu|cpu-safe|openmp|gpu`: choose execution backend (default `auto`). Boolean mode keeps the truth table bit-packed on the GPU for `n ≤ 65536`, so `--backend gpu` avoids re-expanding the data on the host.
 - `--safe`: shortcut for `--backend cpu-safe`
 - `--normalize`: print coefficients divided by `sqrt(n)`
 - `--precision <digits>`: decimal places for floating output (default 6, applies to `--dtype f64` and normalized output)
@@ -317,9 +356,33 @@ Examples:
 # Batch four floating-point transforms (comma/space delimited input)
 ./build/fwht_cli --input spectra.txt --dtype f64 --input-format float --batch-size 4 --precision 8
 
+# Bit-packed Boolean run on the GPU (n ≤ 65536 stays packed over PCIe)
+./build/fwht_cli --values 0,1,1,0,1,0,0,1 --backend gpu
+
 # GPU batch run with profiling metrics
 ./build/fwht_cli --input data/walsh.txt --backend gpu --batch-size 32 --gpu-profile
 ```
+
+#### S-box analysis mode
+
+Use `--sbox` when the input stream represents an `m`-bit → `n`-bit lookup table (2^m entries of unsigned integers in `[0, 2^n)`). The CLI validates power-of-two length and output range, then runs the same component/LAT analyzers exposed through the C and Python APIs.
+
+S-box-specific flags:
+
+- `--sbox-components <path>`: write every Boolean component spectrum (matrix of shape `n × 2^m`) to disk. Works with `--values` or `--input` and inherits text output settings (`--quiet`, `--no-index`).
+- `--sbox-lat <path>`: dump the full linear-approximation table (LAT) to `<path>`; columns follow the usual `(α, β)` ordering.
+- `--sbox-lat-stats`: print `lat_max` and `lat_max_bias` even if you do not write the matrix.
+- `--sbox-lat-only`: skip component spectra entirely (useful when you only need the LAT). Requires either `--sbox-lat` or `--sbox-lat-stats`.
+- `--sbox-profile`: include per-phase timings (`component_fwht_ms`, `lat_column_ms`, `lat_fwht_ms`).
+
+Example (4-bit identity S-box, LAT stats only):
+
+```
+./build/fwht_cli --sbox --values 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 \
+  --sbox-lat-stats --sbox-lat-only
+```
+
+The CLI always prints human-readable metrics for the phases you kept enabled: `m_bits`, `n_bits`, `component_max_walsh`, `component_min_nonlinearity`, and/or `lat_max` with `lat_max_bias`. Combine `--sbox-components` and `--sbox-lat` when you need full artifacts for downstream tooling.
 
 #### Inverse transform
 
@@ -344,11 +407,59 @@ transform and divide by `n`.
 
 ## Testing and Tooling
 
-- `make test`: CPU regression suite (mathematical properties, edge cases, API coverage)
-- `make test-gpu`: CUDA regression and consistency tests (skips cleanly if CUDA is unavailable)
-- `make bench`: build benchmarking utility at `build/fwht_bench`
+### Running Tests
 
-Always run these targets from the `libfwht` root so generated artefacts remain in the build tree.
+The `tests/` directory contains comprehensive C test suites and benchmarking tools:
+
+```bash
+# Run all tests (CPU tests always run; GPU tests run automatically if CUDA is enabled)
+make test
+
+# The above builds and executes:
+# - ./build/test_correctness (CPU, OpenMP, overflow detection)
+# - ./build/test_gpu (GPU tests - only if USE_CUDA=1)
+
+# You can also run test binaries directly after building:
+./build/test_correctness
+./build/test_gpu           # Requires CUDA
+
+# Build and run benchmarks
+make bench
+
+# CPU benchmark
+./build/fwht_bench \
+    --backend=cpu \
+    --sizes=16777216,33554432,67108864,134217728,268435456 \
+    --repeats=10
+
+# GPU benchmark (recommended: includes profiling, optimizations, and larger sizes)
+./build/fwht_bench \
+    --backend=gpu \
+    --sizes=16777216,33554432,67108864,134217728,268435456,1073741824 \
+    --repeats=10 \
+    --warmup=1 \
+    --profile \
+    --pinned \
+    --use-context \
+    --multi-shuffle=on
+```
+
+**Available test programs:**
+- `test_correctness.c` - Core API validation (int32, float64, Boolean functions, batch processing)
+- `test_gpu.c` - GPU-specific tests (device consistency, multi-precision, Tensor Cores)
+- `compare_sboxu_fwht.cpp` - Benchmark against SboxU reference implementation
+- `bench_sbox_lat.c` - S-box LAT computation benchmarks
+
+**Benchmark flags:**
+- `--profile` - Show H2D/Kernel/D2H timing breakdown
+- `--pinned` - Use page-locked host memory for faster transfers
+- `--use-context` - Reuse persistent GPU context (avoids malloc/free overhead)
+- `--multi-shuffle=on` - Enable warp-shuffle optimization for medium sizes
+- `--warmup=N` - Number of warmup iterations before measurement
+
+**Note:** 
+- `make test` automatically detects CUDA and runs GPU tests when available
+- Always run `make` commands from the project root to keep build artifacts organized in `build/` and `lib/`
 
 ## Examples
 
@@ -391,6 +502,9 @@ make openmp bench
 
 # GPU benchmarks (rebuild with CUDA support first)
 make clean && make bench
+
+# If running on a remote server/cluster and output doesn't appear,
+# append '1>&2' to redirect stdout to stderr:
 ./build/fwht_bench \
   --backend=gpu \
   --sizes=16777216,33554432,67108864,134217728,268435456,1073741824 \
@@ -399,7 +513,7 @@ make clean && make bench
   --profile \
   --pinned \
   --use-context \
-  --multi-shuffle=on
+  --multi-shuffle=on 1>&2
 ```
 
 GPU feature flags:
@@ -670,6 +784,44 @@ Apple M4 (macOS 15.7.1, libfwht default OpenMP build, SboxU v1.3.1 sources) show
 |    2^27 |      10 |    1,339,470.00 |        128,634.00 | 10.41× |
 
 The harness prints the same summary to the console (and the CSV/PDF includes every entry), so you can quote raw totals or per-iteration microseconds directly when citing results.
+
+### Sample GPU results (NVIDIA H100)
+
+NVIDIA H100 80GB HBM3 (CUDA 12.6, driver 580.105.08) demonstrates exceptional GPU performance, especially for large transforms where device-resident kernels dominate:
+
+| n (2^k) | threads | SboxU (us/iter) | libfwht CPU (us/iter) | CPU speedup | GPU best (us/iter) | GPU speedup | correctness |
+| ------: | ------: | --------------: | --------------------: | ----------: | -----------------: | ----------: | :---------: |
+|    2^10 |      96 |            4.01 |                  2.83 |       1.42× |              18.45 |       0.22× |    ✓ PASS   |
+|    2^12 |      96 |           18.56 |                 11.68 |       1.59× |              47.49 |       0.39× |    ✓ PASS   |
+|    2^13 |      96 |           40.09 |                 21.51 |       1.86× |              51.71 |       0.78× |    ✓ PASS   |
+|    2^14 |      96 |           84.60 |                 43.81 |       1.93× |              57.13 |       1.48× |    ✓ PASS   |
+|    2^15 |      96 |          179.92 |                101.50 |       1.77× |              63.05 |       2.85× |    ✓ PASS   |
+|    2^16 |      96 |          519.29 |                210.69 |       2.46× |              71.48 |       7.27× |    ✓ PASS   |
+|    2^17 |      96 |        1,131.71 |                189.22 |       5.98× |              84.59 |      13.38× |    ✓ PASS   |
+|    2^18 |      96 |        2,534.10 |                290.14 |       8.73× |             108.82 |      23.29× |    ✓ PASS   |
+|    2^19 |      96 |        6,360.76 |                659.86 |       9.64× |             160.89 |      39.53× |    ✓ PASS   |
+|    2^20 |      96 |       11,938.40 |              1,018.41 |      11.72× |             268.14 |      44.52× |    ✓ PASS   |
+|    2^21 |      96 |       24,629.50 |              1,720.15 |      14.32× |             476.62 |      51.68× |    ✓ PASS   |
+|    2^22 |      96 |       50,798.30 |              3,339.66 |      15.21× |             896.88 |      56.64× |    ✓ PASS   |
+|    2^23 |      96 |      121,669.00 |              6,823.36 |      17.83× |           2,003.24 |      60.74× |    ✓ PASS   |
+|    2^24 |      96 |      263,106.00 |             13,972.30 |      18.83× |           4,782.96 |      55.01× |    ✓ PASS   |
+|    2^25 |      96 |      528,964.00 |             27,852.70 |      18.99× |           9,640.56 |      54.87× |    ✓ PASS   |
+|    2^26 |      96 |    1,472,130.00 |             55,995.60 |      26.29× |          19,445.80 |      75.70× |    ✓ PASS   |
+|    2^27 |      96 |    3,759,530.00 |            111,397.00 |      33.75× |          39,224.70 |      95.85× |    ✓ PASS   |
+
+**Key observations:**
+
+- **Small sizes (n ≤ 2^14)**: CPU dominates due to PCIe transfer overhead; GPU is 0.2-1.5× slower
+- **Medium sizes (2^15 ≤ n ≤ 2^17)**: GPU begins to show advantage (3-13× speedup) as compute becomes significant relative to transfer costs
+- **Large sizes (n ≥ 2^18)**: GPU device-resident kernels deliver massive speedups:
+  - 23× at n=2^18 (262K elements)
+  - 44× at n=2^20 (1M elements)
+  - 60× at n=2^23 (8M elements)
+  - **96× at n=2^27 (134M elements)** — peak performance
+- **Correctness**: All methods (SboxU reference, libfwht CPU, GPU unpacked, GPU packed, GPU device-resident) produce identical results across all tested sizes
+- **GPU metrics**: "GPU best" column shows device-resident kernel timing (excludes PCIe transfers), demonstrating true computational advantage for batch/streaming workloads where data remains on device
+
+Hardware: NVIDIA H100 80GB HBM3 (SM 9.0, 132 SMs, 700W TDP), CUDA 12.6, driver 580.105.08
 
 ## Repository Layout
 

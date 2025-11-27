@@ -7,6 +7,7 @@ ROOT_DIR := ..
 BUILD_DIR := $(ROOT_DIR)/build
 TARGET := $(BUILD_DIR)/compare_sboxu_fwht
 PLATFORM_FILE := $(BUILD_DIR)/.platform
+FWHT_STATIC := $(ROOT_DIR)/lib/libfwht.a
 
 COMPARE_SRC := $(ROOT_DIR)/tests/compare_sboxu_fwht.cpp
 SBOXU_DIR := $(ROOT_DIR)/sboxU/sboxU/sboxU_cython
@@ -15,14 +16,22 @@ SBOXU_SRCS := \
 	$(SBOXU_DIR)/sboxu_cpp_utils.cpp
 
 SOURCES := $(COMPARE_SRC) $(SBOXU_SRCS)
-LIBFWHT_OBJS := \
-	$(BUILD_DIR)/fwht_core.o \
-	$(BUILD_DIR)/fwht_batch.o \
-	$(BUILD_DIR)/fwht_backend.o
 
 CXX ?= clang++
 CXXFLAGS ?= -std=c++17 -O3
 INCFLAGS := -I$(ROOT_DIR)/include -I$(SBOXU_DIR)
+
+CUDA_AVAILABLE := $(shell which nvcc 2>/dev/null)
+ifdef CUDA_AVAILABLE
+	CXXFLAGS += -DUSE_CUDA
+	CUDA_LDFLAGS := -L/usr/local/cuda/lib64 -lcudart
+	CUDA_PATH := $(shell dirname $(shell dirname $(shell which nvcc)))
+	ifneq ($(CUDA_PATH),)
+	CUDA_LDFLAGS := -L$(CUDA_PATH)/lib64 -lcudart
+	endif
+else
+	CUDA_LDFLAGS :=
+endif
 
 UNAME_S := $(shell uname -s)
 PREV_PLATFORM := $(strip $(shell cat $(PLATFORM_FILE) 2>/dev/null))
@@ -75,8 +84,10 @@ endif
 
 all: $(TARGET)
 
-$(TARGET): ensure_libfwht $(SOURCES) $(LIBFWHT_OBJS)
-	$(CXX) $(CXXFLAGS) $(INCFLAGS) $(OMP_CFLAGS) $(SOURCES) $(LIBFWHT_OBJS) $(OMP_LDFLAGS) -o $@
+FWHT_LIBDIR := $(abspath $(ROOT_DIR)/lib)
+
+$(TARGET): ensure_libfwht $(SOURCES) $(FWHT_STATIC)
+	$(CXX) $(CXXFLAGS) $(INCFLAGS) $(OMP_CFLAGS) $(SOURCES) -L$(FWHT_LIBDIR) -lfwht $(CUDA_LDFLAGS) $(OMP_LDFLAGS) -Wl,-rpath,$(FWHT_LIBDIR) -o $@
 
 .PHONY: ensure_libfwht
 ensure_libfwht:

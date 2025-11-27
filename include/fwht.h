@@ -312,6 +312,7 @@ int fwht_batch_f16_cuda_device(const void* d_in, void* d_out,
  * ============================================================================ */
 
 typedef struct fwht_gpu_context fwht_gpu_context_t;
+typedef struct fwht_gpu_boolean_context fwht_gpu_boolean_context_t;
 
 /*
  * Create a persistent GPU context with pre-allocated device memory.
@@ -425,6 +426,22 @@ fwht_status_t fwht_gpu_context_set_callbacks_f64(fwht_gpu_context_t* ctx,
                                                    fwht_load_fn_f64 load_fn,
                                                    fwht_store_fn_f64 store_fn,
                                                    void* user_params);
+
+/* =========================================================================
+ * BIT-PACKED BOOLEAN GPU CONTEXT
+ * ========================================================================= */
+
+/*
+ * Persistent GPU context specialized for bit-packed Boolean FWHT calls.
+ * Reuses device buffers for packed bits and ±1 spectra to avoid per-call
+ * cudaMalloc/cudaFree churn when invoking fwht_boolean_packed_backend(..., GPU).
+ */
+fwht_gpu_boolean_context_t* fwht_gpu_boolean_context_create(size_t max_n);
+void fwht_gpu_boolean_context_destroy(fwht_gpu_boolean_context_t* ctx);
+fwht_status_t fwht_gpu_boolean_context_compute(fwht_gpu_boolean_context_t* ctx,
+                                               const uint64_t* packed_bits,
+                                               int32_t* wht_out,
+                                               size_t n);
 #endif /* __CUDACC__ || USE_CUDA */
 
 #endif

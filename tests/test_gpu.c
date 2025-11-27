@@ -233,6 +233,69 @@ static int test_gpu_batch_large_transform() {
     return result;
 }
 
+static int test_gpu_boolean_packed_backend(void) {
+    if (!fwht_has_gpu()) {
+        return 1;
+    }
+
+    const size_t sizes[] = {64, 256, 1024, 4096};
+    const size_t num_sizes = sizeof(sizes) / sizeof(sizes[0]);
+
+    for (size_t idx = 0; idx < num_sizes; ++idx) {
+        const size_t n = sizes[idx];
+        const size_t words = (n + 63u) / 64u;
+        uint64_t* packed = (uint64_t*)calloc(words, sizeof(uint64_t));
+        int32_t* cpu_out = (int32_t*)malloc(n * sizeof(int32_t));
+        int32_t* gpu_out = (int32_t*)malloc(n * sizeof(int32_t));
+
+        if (!packed || !cpu_out || !gpu_out) {
+            free(packed);
+            free(cpu_out);
+            free(gpu_out);
+            return 0;
+        }
+
+        for (size_t w = 0; w < words; ++w) {
+            uint64_t value = ((uint64_t)rand() << 32) ^ (uint64_t)rand();
+            packed[w] = value;
+        }
+
+        fwht_status_t cpu_status = fwht_boolean_packed(packed, cpu_out, n);
+        fwht_status_t gpu_status = fwht_boolean_packed_backend(packed, gpu_out, n, FWHT_BACKEND_GPU);
+
+        if (gpu_status == FWHT_ERROR_BACKEND_UNAVAILABLE) {
+            free(packed);
+            free(cpu_out);
+            free(gpu_out);
+            printf(" (GPU boolean backend unavailable)");
+            return 1; /* Skip entire test when backend missing */
+        }
+
+        if (cpu_status != FWHT_SUCCESS || gpu_status != FWHT_SUCCESS) {
+            free(packed);
+            free(cpu_out);
+            free(gpu_out);
+            return 0;
+        }
+
+        for (size_t i = 0; i < n; ++i) {
+            if (cpu_out[i] != gpu_out[i]) {
+                free(packed);
+                free(cpu_out);
+                free(gpu_out);
+                printf(" (bit-packed mismatch at size %zu index %zu)", n, i);
+                return 0;
+            }
+        }
+
+        free(packed);
+        free(cpu_out);
+        free(gpu_out);
+    }
+
+    return 1;
+}
+
 /* Test: GPU double precision matches CPU */
 static int test_gpu_vs_cpu_f64() {
     const size_t n = 1024;
@@ -1333,6 +1396,7 @@ int main(void) {
     RUN_TEST(test_gpu_callback_null_context);
     RUN_TEST(test_gpu_callback_configuration);
     RUN_TEST(test_gpu_transform_with_null_callbacks);
+    RUN_TEST(test_gpu_boolean_packed_backend);
     
     printf("\n");
     printf("Test Summary:\n");

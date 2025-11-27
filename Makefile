@@ -22,6 +22,8 @@
 # Configuration
 # ============================================================================
 
+RUN_TESTS ?= 0
+
 CC = gcc
 CXX = g++
 NVCC = nvcc
@@ -37,7 +39,25 @@ else
 	CXXFLAGS += -march=native
 endif
 NVCCFLAGS = -O3 -I$(INCLUDE_DIR) --compiler-options -fPIC -std=c++17
+
+# Auto-detect CUDA version and adjust architecture list for compatibility
+# Check if nvcc is available (independent of USE_CUDA which is set later)
+NVCC_EXISTS := $(shell which nvcc 2>/dev/null)
+ifneq ($(NVCC_EXISTS),)
+# Extract CUDA version (e.g., "12.3" from "release 12.3")
+CUDA_VERSION := $(shell nvcc --version 2>/dev/null | sed -n 's/.*release \([0-9]\+\.[0-9]\+\).*/\1/p')
+CUDA_MAJOR := $(shell echo "$(CUDA_VERSION)" | cut -d. -f1)
+# CUDA 12+ dropped support for compute_70 and below (Volta and older)
+# Default to newer architectures if CUDA 12+, otherwise include older ones
+ifeq ($(shell [ "$(CUDA_MAJOR)" -ge 12 ] 2>/dev/null && echo 1 || echo 0),1)
+    CUDA_ARCH_LIST ?= 80 86 89 90
+else
+    CUDA_ARCH_LIST ?= 70 75 80 86 89 90
+endif
+else
 CUDA_ARCH_LIST ?= 70 75 80 86 89 90
+endif
+
 ifneq ($(strip $(CUDA_ARCH_LIST)),)
 CUDA_ARCH_LIST_LAST := $(lastword $(CUDA_ARCH_LIST))
 NVCC_ARCH_FLAGS := $(foreach arch,$(CUDA_ARCH_LIST),-gencode arch=compute_$(arch),code=sm_$(arch))
@@ -161,7 +181,11 @@ endif
 
 .PHONY: all clean test install lib static shared directories bench cli
 
+ifeq ($(RUN_TESTS),1)
 all: directories lib test
+else
+all: directories lib
+endif
 
 # Convenience alias (common typo)
 example: examples
@@ -399,7 +423,7 @@ help:
 	@echo "FWHT Library Makefile"
 	@echo ""
 	@echo "Targets:"
-	@echo "  all       - Build library and run tests (default)"
+	@echo "  all       - Build library (tests optional via RUN_TESTS=1)"
 	@echo "  lib       - Build both static and shared libraries"
 	@echo "  static    - Build static library only"
 	@echo "  shared    - Build shared library only"
@@ -422,9 +446,11 @@ help:
 	@echo "  NO_OPENMP=1  - Disable OpenMP support (enabled by default)"
 	@echo "  NO_SIMD=1    - Disable auto SIMD optimization flags"
 	@echo "  NO_CUDA=1    - Disable CUDA support"
+	@echo "  RUN_TESTS=1  - Run full test suite as part of 'make all'"
 	@echo ""
 	@echo "Examples:"
-	@echo "  make                  # Build with OpenMP (default)"
+	@echo "  make                  # Build with OpenMP (default, no tests)"
+	@echo "  make RUN_TESTS=1      # Build and run full test suite"
 	@echo "  make bench            # Build benchmark tool"
 	@echo "  make NO_OPENMP=1      # Build without OpenMP"
 	@echo "  make NO_SIMD=1        # Build without auto SIMD flags"

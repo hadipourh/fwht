@@ -53,6 +53,9 @@ fwht_status_t fwht_batch_i32_cuda_device_async(int32_t* d_data,
 											   size_t n,
 											   size_t batch_size,
 											   cudaStream_t stream);
+fwht_status_t fwht_boolean_packed_cuda(const uint64_t* packed_bits,
+											 int32_t* wht_out,
+											 size_t n);
 
 fwht_status_t fwht_cuda_lat_build_direct(const uint32_t* table,
 										 size_t size,

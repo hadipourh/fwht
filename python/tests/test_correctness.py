@@ -216,6 +216,58 @@ class TestBooleanFunctions:
             assert len(result) == 8
             assert result.dtype == np.int32
 
+    @pytest.mark.skipif(not pyfwht.has_gpu(), reason="GPU backend unavailable")
+    def test_boolean_packed_gpu_matches_cpu(self):
+        """Bit-packed Boolean GPU backend matches CPU output."""
+        n = 256
+        n_words = (n + 63) // 64
+        rng = np.random.default_rng(1337)
+        packed = rng.integers(0, 2**64, size=n_words, dtype=np.uint64)
+
+        cpu = pyfwht.boolean_packed(packed.copy(), n, backend=pyfwht.Backend.CPU)
+        gpu = pyfwht.boolean_packed(packed.copy(), n, backend=pyfwht.Backend.GPU)
+
+        np.testing.assert_array_equal(cpu, gpu)
+
+
+class TestSBoxAnalysis:
+    """Test vectorial S-box analysis helper."""
+
+    def test_analyze_sbox_identity(self):
+        """Identity 3-bit S-box should have perfect linear structures."""
+        table = np.arange(8, dtype=np.uint32)
+        result = pyfwht.analyze_sbox(
+            table,
+            backend=pyfwht.Backend.CPU,
+            return_spectra=True,
+            return_lat=True,
+        )
+
+        assert result.components.n_bits == 3
+        assert result.components.size == 8
+        assert result.components.spectra is not None
+        assert result.components.spectra.shape == (3, 8)
+        assert np.max(np.abs(result.components.spectra)) == result.components.max_walsh
+
+        assert result.lat is not None
+        assert result.lat.lat.shape == (8, 8)
+        assert result.lat.lat_max == 8
+        assert np.isclose(result.lat.lat_max_bias, 1.0)
+
+    def test_analyze_sbox_components_only(self):
+        """Components-only mode skips LAT computation and buffers."""
+        table = np.array([6, 5, 0, 7, 2, 1, 3, 4], dtype=np.uint32)
+        result = pyfwht.analyze_sbox(
+            table,
+            backend=pyfwht.Backend.CPU,
+            compute_lat=False,
+            return_spectra=False,
+        )
+
+        assert result.components.n_bits == 3
+        assert result.components.spectra is None
+        assert result.lat is None
+
 
 class TestOutOfPlace:
     """Test out-of-place compute functions."""

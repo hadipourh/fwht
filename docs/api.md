@@ -107,12 +107,41 @@ fwht_i32_backend(data, 1024, FWHT_BACKEND_GPU);
 GPU features in `fwht.h`:
 - **Batch kernels**: `fwht_batch_i32_cuda`, `fwht_batch_f64_cuda`, `fwht_batch_f32_cuda` operate on host arrays (copies handled internally).
 - **Device-pointer APIs**: `fwht_batch_*_cuda_device` skip host copies when you already hold device memory.
+- **Bit-packed Boolean GPU path**: `fwht_boolean_packed_backend(..., FWHT_BACKEND_GPU)` expands 1-bit truth tables on the device for `n ≤ 65536`, saving PCIe bandwidth for CLI and S-box workflows.
+- **Boolean GPU contexts**: `fwht_gpu_boolean_context_{create,compute,destroy}` keep packed truth tables resident on device so repeated S-box transforms avoid `cudaMalloc`/`cudaMemcpy` overhead.
 - **FP16 Tensor Core path**: `fwht_batch_f16_cuda_device` accelerates fp16 workloads.
 - **Persistent contexts**: `fwht_gpu_context_create(max_n, max_batch)` plus `fwht_gpu_context_compute_*` amortize allocations across repeated calls.
 - **Profiling and tuning**: enable metrics via `fwht_gpu_set_profiling(true)` and read them with `fwht_gpu_get_last_metrics`. Adjust kernel behavior with `fwht_gpu_set_block_size`, `fwht_gpu_set_multi_shuffle`, and inspect device info (`fwht_gpu_get_device_name`, `fwht_gpu_get_compute_capability`, etc.).
 - **Memory helpers**: `fwht_gpu_host_alloc`, `fwht_gpu_device_alloc`, and the copy utilities simplify pinned-memory transfers.
 
 All GPU-only APIs return `FWHT_ERROR_BACKEND_UNAVAILABLE` when CUDA is not present, so the same code can run on CPU-only deployments.
+
+---
+
+### Persistent GPU Contexts
+
+Reusing device buffers is critical when you launch thousands of transforms back-to-back. libfwht ships two lightweight context types that you can hang onto for as long as you need.
+
+#### Float/Double/Int Context
+
+```c
+fwht_gpu_context_t* ctx = fwht_gpu_context_create(/*max_n=*/32768, /*max_batch=*/64);
+fwht_gpu_context_set_callbacks_i32(ctx, NULL, NULL, NULL);  // optional
+fwht_gpu_context_compute_i32(ctx, host_data, n, batch);
+fwht_gpu_context_destroy(ctx);
+```
+
+The context internally owns a CUDA stream plus separate buffers for int32 and double data; every call to `fwht_gpu_context_compute_*` issues async H2D copies, launches the best kernel for `(n, batch)`, then copies the results back while reusing those buffers.
+
+#### Bit-packed Boolean Context
+
+```c
+fwht_gpu_boolean_context_t* bctx = fwht_gpu_boolean_context_create(65536);
+fwht_gpu_boolean_context_compute(bctx, packed_truth_table, walsh, n);
+fwht_gpu_boolean_context_destroy(bctx);
+```
+
+This variant mirrors the float/int context but stores the packed `uint64_t` words and the `int32_t` ±1 spectrum. It automatically powers the CLI and `fwht_boolean_packed_backend(..., FWHT_BACKEND_GPU)`, so ordinary API users already benefit from the cached device memory; advanced users can create/destroy their own contexts to manage lifetime explicitly or to run multiple concurrent Boolean workloads per device.
 
 ---
 
@@ -131,6 +160,7 @@ Key options (see `./build/fwht_cli --help` for the full list):
 - `--backend auto|cpu|cpu-safe|openmp|gpu` – mirror the C backend selector.
 - `--gpu-profile`, `--gpu-block-size <pow2>` – expose CUDA profiling/tuning knobs when the library is built with CUDA.
 - `--normalize`, `--precision <digits>`, `--no-index`, `--quiet` – adjust output formatting for downstream tools.
+- Boolean input (`--input-format bool`, default) keeps truth tables packed whenever you run `--backend gpu` with `n ≤ 65536`, so the CLI hands the CUDA backend compressed data and unpacks directly on device.
 
 ---
 

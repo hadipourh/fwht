@@ -22,7 +22,8 @@ from ._pyfwht import Backend, Config
 import numpy as np
 import warnings
 import os
-from typing import Optional, Union, Any
+from dataclasses import dataclass
+from typing import Optional, Union, Any, Sequence
 
 # Global flag for fp16 precision warning (shown only once)
 _fp16_warning_shown = False
@@ -46,6 +47,8 @@ from ._pyfwht import (
     fwht_boolean_packed as _fwht_boolean_packed,
     fwht_boolean_packed_backend as _fwht_boolean_packed_backend,
     fwht_boolean_batch as _fwht_boolean_batch,
+    sbox_analyze_components as _sbox_analyze_components,
+    sbox_analyze_lat as _sbox_analyze_lat,
     Context as _Context,
     is_power_of_2,
     log2,
@@ -82,8 +85,12 @@ __all__ = [
     'correlations',
     'boolean_packed',
     'boolean_batch',
+    'analyze_sbox',
     'vectorized_batch_i32',
     'vectorized_batch_f64',
+    'SBoxComponentMetrics',
+    'SBoxLatMetrics',
+    'SBoxAnalysis',
     'is_power_of_2',
     'log2',
     'recommend_backend',
@@ -94,6 +101,65 @@ __all__ = [
     'gpu',  # GPU module
     'gpu_get_compute_capability',
 ]
+
+
+@dataclass
+class SBoxComponentMetrics:
+    """Component-analysis metrics returned by :func:`analyze_sbox`."""
+
+    m_bits: int
+    n_bits: int
+    size: int
+    max_walsh: int
+    min_nonlinearity: float
+    fwht_ms: float
+    spectra: Optional[np.ndarray] = None
+
+
+@dataclass
+class SBoxLatMetrics:
+    """Linear approximation table metrics returned by :func:`analyze_sbox`."""
+
+    m_bits: int
+    n_bits: int
+    size: int
+    lat_max: int
+    lat_max_bias: float
+    column_ms: float
+    fwht_ms: float
+    lat: Optional[np.ndarray] = None
+
+
+@dataclass
+class SBoxAnalysis:
+    """Combined result with component and LAT metrics for an S-box."""
+
+    components: SBoxComponentMetrics
+    lat: Optional[SBoxLatMetrics] = None
+
+
+def _coerce_backend_arg(backend: Optional[Union[Backend, str]]) -> Backend:
+    """Normalize backend arguments shared across helper APIs."""
+
+    if backend is None:
+        return Backend.AUTO
+    if isinstance(backend, Backend):
+        return backend
+    if isinstance(backend, str):
+        name = backend.strip().lower()
+        mapping = {
+            'auto': Backend.AUTO,
+            'cpu': Backend.CPU,
+            'openmp': Backend.OPENMP,
+            'gpu': Backend.GPU,
+            'cuda': Backend.GPU,
+        }
+        if name not in mapping:
+            raise ValueError(
+                f"Unknown backend string '{backend}'. Expected one of: auto,cpu,openmp,gpu,cuda"
+            )
+        return mapping[name]
+    raise TypeError("backend must be None, a Backend enum, or string identifier")
 
 
 def _warn_fp16_precision():
@@ -245,7 +311,8 @@ def transform(
         Modified in-place.
     backend : Backend, optional
         Backend selection (AUTO, CPU, OPENMP, GPU).
-        If None, uses AUTO backend.
+        If None, uses AUTO backend. Set to :class:`Backend.GPU`
+        to unpack directly on the CUDA device (n ≤ 65536).
     
     Raises
     ------
@@ -580,6 +647,85 @@ def correlations(truth_table: np.ndarray) -> np.ndarray:
         truth_table = truth_table.astype(np.uint8)
     
     return _fwht_correlations(truth_table)
+
+
+def analyze_sbox(
+    table: Union[Sequence[int], np.ndarray],
+    *,
+    backend: Optional[Union[Backend, str]] = None,
+    compute_lat: bool = True,
+    profile_timings: bool = False,
+    return_spectra: bool = False,
+    return_lat: bool = False,
+) -> SBoxAnalysis:
+    """Analyze Boolean components and LAT metrics for a vectorial S-box.
+
+    Parameters
+    ----------
+    table : array-like of uint32/int
+        Lookup table with ``2^m`` entries describing the S-box outputs.
+    backend : Backend or str, optional
+        Backend hint passed to the underlying C library. Defaults to AUTO.
+    compute_lat : bool, default=True
+        Whether to compute LAT metrics (lat_max, bias, timings).
+    profile_timings : bool, default=False
+        Collect per-phase timings from the C implementation.
+    return_spectra : bool, default=False
+        If True, also return the Walsh spectra of each Boolean component.
+    return_lat : bool, default=False
+        If True, materialize the full LAT matrix.
+
+    Returns
+    -------
+    SBoxAnalysis
+        Dataclass with component metrics and (optionally) LAT metrics.
+    """
+
+    table_arr = np.asarray(table, dtype=np.uint32)
+    if table_arr.ndim != 1:
+        raise ValueError("S-box table must be a 1-D array")
+
+    backend_enum = _coerce_backend_arg(backend)
+
+    comp_dict, comp_spectra = _sbox_analyze_components(
+        table_arr,
+        backend_enum,
+        profile_timings,
+        return_spectra,
+    )
+    components = SBoxComponentMetrics(
+        m_bits=int(comp_dict['m_bits']),
+        n_bits=int(comp_dict['n_bits']),
+        size=int(comp_dict['size']),
+        max_walsh=int(comp_dict['max_walsh']),
+        min_nonlinearity=float(comp_dict['min_nonlinearity']),
+        fwht_ms=float(comp_dict['fwht_ms']),
+        spectra=comp_spectra if return_spectra else None,
+    )
+
+    if return_lat:
+        compute_lat = True
+
+    lat_metrics: Optional[SBoxLatMetrics] = None
+    if compute_lat:
+        lat_dict, lat_matrix = _sbox_analyze_lat(
+            table_arr,
+            backend_enum,
+            profile_timings,
+            return_lat,
+        )
+        lat_metrics = SBoxLatMetrics(
+            m_bits=int(lat_dict['m_bits']),
+            n_bits=int(lat_dict['n_bits']),
+            size=int(lat_dict['size']),
+            lat_max=int(lat_dict['lat_max']),
+            lat_max_bias=float(lat_dict['lat_max_bias']),
+            column_ms=float(lat_dict['column_ms']),
+            fwht_ms=float(lat_dict['fwht_ms']),
+            lat=lat_matrix if return_lat else None,
+        )
+
+    return SBoxAnalysis(components=components, lat=lat_metrics)
 
 
 def boolean_packed(

@@ -31,6 +31,11 @@ examples/example_boolean_packed
 
 # Optional third-party clones
 sboxU/
+meta/
+fast-hadamard-transform/
+references/
+python/RELEASE.md
+python/examples/benchmark_pyfwht_vs_daolib.txt
 
 # Generic Python caches
 **/__pycache__/
