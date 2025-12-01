@@ -46,10 +46,15 @@ The Fast Walsh-Hadamard Transform computes the Walsh spectrum of k-variable Bool
 - Prerequisites: C99 compiler, `make`; optional OpenMP toolchain; optional CUDA toolkit when GPU support is desired
 - Default build (library + regression tests): `make`
 - Focused targets: `make lib`, `make test`, `make test-gpu`, `make openmp`, `make NO_CUDA=1`
+- Optional tuning: `make tune-backend` benchmarks CPU vs OpenMP on the local machine and writes `meta/backend_threshold.json`; automatic backend selection consumes this file when present.
 - CUDA architectures: `make` now emits SASS for `sm_70 75 80 86 89 90` plus a PTX fallback by default; override with `CUDA_ARCH_LIST="80 90" make` (or any space-separated list) to target a custom subset, or set it empty to fall back to the historical `-arch=sm_80` default.
 - Installation (optional): `sudo make install` installs headers and libraries into `/usr/local`
 
 Build outputs are placed in `build/` (executables) and `lib/` (libraries).
+
+### Backend tuning (optional)
+
+`make tune-backend` builds a tiny utility (`build/backend_tuner`) that times the single-threaded CPU backend against OpenMP across a sweep of transform sizes. The fastest crossover point (where OpenMP is at least 20% faster by default) is stored in `meta/backend_threshold.json` alongside the GPU recommendation. At runtime, `fwht_recommend_backend()` loads this file once and overrides the baked-in defaults (CPU→OpenMP at 2^13, CPU→GPU at 2^20). If the file is absent or malformed, the dispatcher silently falls back to the defaults, so the tuning step is entirely optional but provides host-specific behavior when desired.
 
 ## Library Usage
 

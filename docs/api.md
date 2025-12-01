@@ -198,6 +198,10 @@ Install locally with `pip install -e python/` or build a wheel via `python -m bu
 - **GPU contexts** – destroy contexts with `fwht_gpu_context_destroy` to free device memory.
 - **CLI parsing** – float tokens require `--dtype f64 --input-format float`; otherwise the CLI intentionally rejects non-integer data.
 
+### Customizing backend thresholds
+
+`fwht_recommend_backend()` now reads host-specific thresholds from `meta/backend_threshold.json` when the file exists. Run `make tune-backend` to benchmark CPU vs OpenMP locally; the generated file overrides the default heuristics (CPU→OpenMP at 2^13, CPU→GPU at 2^20). If you skip the tuning step, the compile-time defaults stay in effect.
+
 ---
 
 ## 8. Further Reading

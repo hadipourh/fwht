@@ -35,6 +35,7 @@
 #include <math.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <limits.h>
 
 /* Compiler-specific restrict keyword */
 #if defined(__GNUC__) || defined(__clang__)
@@ -79,6 +80,42 @@
 #elif defined(__GNUC__)
 #pragma GCC diagnostic pop
 #endif
+#endif
+
+/*
+ * OpenMP warmup to avoid paying thread creation cost during the first
+ * user-visible transform. Executed at most once per process.
+ */
+#ifdef _OPENMP
+static void fwht_openmp_warmup_once(void) {
+#if defined(_WIN32)
+    static LONG warmed = 0;
+    if (InterlockedCompareExchange(&warmed, 1, 0) != 0) {
+        return;
+    }
+#elif defined(__GNUC__) || defined(__clang__)
+    static int warmed = 0;
+    if (__sync_lock_test_and_set(&warmed, 1)) {
+        return;
+    }
+#else
+    static int warmed = 0;
+    if (warmed) {
+        return;
+    }
+    warmed = 1;
+#endif
+
+    #pragma omp parallel
+    {
+        #pragma omp single
+        (void)0;
+    }
+}
+#else
+static void fwht_openmp_warmup_once(void) {
+    (void)0;
+}
 #endif
 
 static void fwht_print_simd_banner(void) {
@@ -170,11 +207,15 @@ static inline void fwht_process_range_i32(int32_t* FWHT_RESTRICT even,
     }
 #endif
 
-    for (; j < count; ++j) {
-        int32_t a = even[j];
-        int32_t b = odd[j];
-        even[j] = a + b;
-        odd[j]  = a - b;
+    size_t tail = j;
+    #if defined(_OPENMP)
+    #pragma omp simd
+    #endif
+    for (size_t idx = tail; idx < count; ++idx) {
+        int32_t a = even[idx];
+        int32_t b = odd[idx];
+        even[idx] = a + b;
+        odd[idx]  = a - b;
     }
 }
 
@@ -292,11 +333,15 @@ static inline void fwht_process_range_f64(double* FWHT_RESTRICT even,
 #endif
 
     /* Scalar tail: process remaining elements */
-    for (; j < count; ++j) {
-        double a = even[j];
-        double b = odd[j];
-        even[j] = a + b;
-        odd[j]  = a - b;
+    size_t tail = j;
+    #if defined(_OPENMP)
+    #pragma omp simd
+    #endif
+    for (size_t idx = tail; idx < count; ++idx) {
+        double a = even[idx];
+        double b = odd[idx];
+        even[idx] = a + b;
+        odd[idx]  = a - b;
     }
 }
 
@@ -510,22 +555,96 @@ static void fwht_butterfly_f64(double* data, size_t n) {
  * OPENMP PARALLEL VARIANTS
  * ========================================================================== */
 
-/* 
- * Recursive cutoff: below this size, use iterative base case.
- * Tuned for L1 cache (typically 32-64KB).
- * 512 elements * 4 bytes = 2KB, well within L1 cache.
- */
 #define FWHT_RECURSIVE_CUTOFF 512
+#define FWHT_OPENMP_DEFAULT_STAGE_THRESHOLD (SIZE_MAX)
+#define FWHT_OPENMP_DEFAULT_STAGE_CHUNK 0
 
-/*
- * Base case for recursion: iterative FWHT with SIMD acceleration.
- * Processes arrays small enough to fit in L1 cache.
- * Includes software prefetching to hide memory latency.
- */
+static size_t fwht_openmp_stage_threshold_cache = 0;
+static int fwht_openmp_stage_chunk_cache = 0;
+
+static size_t fwht_get_openmp_stage_threshold(void) {
+    size_t cached = fwht_openmp_stage_threshold_cache;
+    if (cached != 0) {
+        return cached;
+    }
+
+    size_t threshold = FWHT_OPENMP_DEFAULT_STAGE_THRESHOLD;
+    const char* env = getenv("FWHT_OMP_STAGE_THRESHOLD");
+    if (env && *env) {
+        char* endptr = NULL;
+        unsigned long long value = strtoull(env, &endptr, 10);
+        if (endptr != env && value >= (unsigned long long)(FWHT_RECURSIVE_CUTOFF << 1)) {
+            threshold = (size_t)value;
+        }
+    }
+
+    if (threshold < (size_t)(FWHT_RECURSIVE_CUTOFF << 1)) {
+        threshold = (size_t)(FWHT_RECURSIVE_CUTOFF << 1);
+    }
+
+    fwht_openmp_stage_threshold_cache = threshold;
+    return threshold;
+}
+
+static int fwht_get_openmp_stage_chunk(void) {
+    int cached = fwht_openmp_stage_chunk_cache;
+    if (cached != 0) {
+        return cached;
+    }
+
+    int chunk = FWHT_OPENMP_DEFAULT_STAGE_CHUNK;
+    const char* env = getenv("FWHT_OMP_STAGE_CHUNK");
+    if (env && *env) {
+        char* endptr = NULL;
+        long value = strtol(env, &endptr, 10);
+        if (endptr != env && value >= 0 && value <= 65536) {
+            chunk = (int)value;
+        }
+    }
+
+    fwht_openmp_stage_chunk_cache = chunk;
+    return chunk;
+}
+
+static int fwht_stage_chunk_for_blocks(size_t blocks, int thread_count) {
+    int chunk = fwht_get_openmp_stage_chunk();
+    if (chunk > 0) {
+        return chunk;
+    }
+
+    if (thread_count <= 0) {
+        thread_count = 1;
+    }
+
+    size_t per_thread = (blocks + (size_t)thread_count - 1) / (size_t)thread_count;
+    if (per_thread == 0) {
+        return 1;
+    }
+
+    if (per_thread > (size_t)INT_MAX) {
+        return INT_MAX;
+    }
+
+    return (int)per_thread;
+}
+
+static int fwht_openmp_task_depth(int num_threads) {
+    if (num_threads < 4) {
+        return 2;
+    }
+
+    int log_threads = 0;
+    while (num_threads > 1) {
+        num_threads >>= 1;
+        log_threads++;
+    }
+
+    return log_threads + 2;
+}
+
 static void fwht_butterfly_i32_base(int32_t* data, size_t n) {
     for (size_t h = 1; h < n; h *= 2) {
         for (size_t i = 0; i < n; i += h * 2) {
-            /* Prefetch next block to hide memory latency */
             size_t stride = h * 2;
             if (i + stride < n) {
 #if defined(__GNUC__) || defined(__clang__)
@@ -538,100 +657,124 @@ static void fwht_butterfly_i32_base(int32_t* data, size_t n) {
     }
 }
 
-/*
- * Recursive helper for OpenMP task-based FWHT.
- * 
- * Algorithm:
- *   1. If n <= cutoff: process iteratively (stays in L1 cache)
- *   2. Otherwise:
- *      a. Recursively transform left half  (independent)
- *      b. Recursively transform right half (independent) 
- *      c. Combine halves with butterfly operation
- * 
- * Depth parameter limits task creation to avoid overhead.
- * Adaptive: depth limit is calculated based on thread count.
- * With T threads, create tasks while depth < log2(T) + 2.
- * This ensures roughly T tasks are active at peak parallelism.
- */
+static void fwht_butterfly_i32_parallel_stage(int32_t* data, size_t n) {
+    size_t stage_threshold = fwht_get_openmp_stage_threshold();
+    size_t h = 1;
+
+    while (h < n && (h << 1) < stage_threshold) {
+        size_t stride = h << 1;
+        for (size_t i = 0; i < n; i += stride) {
+#if defined(__GNUC__) || defined(__clang__)
+            if (i + stride < n) {
+                __builtin_prefetch(data + i + stride, 1, 3);
+                __builtin_prefetch(data + i + stride + h, 1, 3);
+            }
+#endif
+            fwht_process_range_i32(data + i, data + i + h, h);
+        }
+        h <<= 1;
+    }
+
+    if (h >= n) {
+        return;
+    }
+
+    #pragma omp parallel
+    {
+        int thread_count = omp_get_num_threads();
+        for (size_t stage_h = h; stage_h < n; stage_h <<= 1) {
+            size_t stride = stage_h << 1;
+            size_t blocks = n / stride;
+            int chunk = fwht_stage_chunk_for_blocks(blocks, thread_count);
+
+            #pragma omp for schedule(static, chunk)
+            for (size_t block = 0; block < blocks; ++block) {
+                size_t base = block * stride;
+
+#if defined(__GNUC__) || defined(__clang__)
+                if (block + 1 < blocks) {
+                    __builtin_prefetch(data + base + stride, 1, 3);
+                    __builtin_prefetch(data + base + stride + stage_h, 1, 3);
+                }
+#endif
+                fwht_process_range_i32(data + base, data + base + stage_h, stage_h);
+            }
+        }
+    }
+}
+
+static void fwht_combine_i32_parallel(int32_t* even,
+                                      int32_t* odd,
+                                      size_t count,
+                                      int depth,
+                                      int max_depth) {
+    if (count <= FWHT_RECURSIVE_CUTOFF || depth >= max_depth) {
+        fwht_process_range_i32(even, odd, count);
+        return;
+    }
+
+    size_t mid = count >> 1;
+
+    #pragma omp task shared(even, odd) if(depth < max_depth)
+    fwht_combine_i32_parallel(even, odd, mid, depth + 1, max_depth);
+
+    #pragma omp task shared(even, odd) if(depth < max_depth)
+    fwht_combine_i32_parallel(even + mid, odd + mid, count - mid, depth + 1, max_depth);
+
+    #pragma omp taskwait
+}
+
 static void fwht_butterfly_i32_recursive(int32_t* data, size_t n, int depth, int max_depth) {
     if (n <= FWHT_RECURSIVE_CUTOFF) {
         fwht_butterfly_i32_base(data, n);
         return;
     }
-    
+
     size_t half = n >> 1;
-    
-    /* Create tasks for the two independent halves (if not too deep) */
+
     #pragma omp task shared(data) if(depth < max_depth)
     fwht_butterfly_i32_recursive(data, half, depth + 1, max_depth);
-    
+
     #pragma omp task shared(data) if(depth < max_depth)
     fwht_butterfly_i32_recursive(data + half, half, depth + 1, max_depth);
-    
+
     #pragma omp taskwait
-    
-    /* Combine: butterfly between the two halves */
-    fwht_process_block_i32(data, 0, half);
+
+    fwht_combine_i32_parallel(data, data + half, half, depth, max_depth);
 }
 
-/*
- * OpenMP entry point using recursive task-based parallelism.
- * Much better cache locality and scaling than stage-based approach.
- * 
- * Adaptive task depth: calculates optimal depth based on number of threads.
- * Formula: max_depth = log2(num_threads) + 2
- * This creates roughly 2-4x more tasks than threads for good load balancing.
- * 
- * NOTE: If already in a parallel region (nested parallelism), falls back to
- * sequential version to avoid deadlocks.
- */
 static void fwht_butterfly_i32_openmp(int32_t* data, size_t n) {
     if (n < 2) {
         return;
     }
-    
-    /* Check if we're already in a parallel region (nested parallelism) */
-    #ifdef _OPENMP
+
+#ifdef _OPENMP
     if (omp_in_parallel()) {
-        /* Already in parallel region - use sequential version to avoid deadlock */
         fwht_butterfly_i32(data, n);
         return;
     }
-    #endif
-    
+#endif
+
+    if (n >= fwht_get_openmp_stage_threshold()) {
+        fwht_butterfly_i32_parallel_stage(data, n);
+        return;
+    }
+
     #pragma omp parallel
     {
         #pragma omp single
         {
-            /* Calculate adaptive task depth based on thread count */
             int num_threads = omp_get_num_threads();
-            int max_depth = 2;  /* Minimum depth for small thread counts */
-            
-            /* For larger thread counts, scale depth adaptively */
-            if (num_threads >= 4) {
-                /* Calculate log2(num_threads) */
-                int log_threads = 0;
-                int t = num_threads;
-                while (t > 1) {
-                    t >>= 1;
-                    log_threads++;
-                }
-                max_depth = log_threads + 2;  /* +2 for good load balancing */
-            }
-            
+            int max_depth = fwht_openmp_task_depth(num_threads);
+
             fwht_butterfly_i32_recursive(data, n, 0, max_depth);
         }
     }
 }
 
-/*
- * Base case for recursion: iterative FWHT for double precision.
- * Includes software prefetching to hide memory latency.
- */
 static void fwht_butterfly_f64_base(double* data, size_t n) {
     for (size_t h = 1; h < n; h <<= 1) {
         for (size_t i = 0; i < n; i += h * 2) {
-            /* Prefetch next block to hide memory latency */
             size_t stride = h * 2;
             if (i + stride < n) {
 #if defined(__GNUC__) || defined(__clang__)
@@ -644,69 +787,116 @@ static void fwht_butterfly_f64_base(double* data, size_t n) {
     }
 }
 
-/*
- * Recursive helper for double precision OpenMP FWHT.
- */
+static void fwht_butterfly_f64_parallel_stage(double* data, size_t n) {
+    size_t stage_threshold = fwht_get_openmp_stage_threshold();
+    size_t h = 1;
+
+    while (h < n && (h << 1) < stage_threshold) {
+        size_t stride = h << 1;
+        for (size_t i = 0; i < n; i += stride) {
+#if defined(__GNUC__) || defined(__clang__)
+            if (i + stride < n) {
+                __builtin_prefetch(data + i + stride, 1, 3);
+                __builtin_prefetch(data + i + stride + h, 1, 3);
+            }
+#endif
+            fwht_process_range_f64(data + i, data + i + h, h);
+        }
+        h <<= 1;
+    }
+
+    if (h >= n) {
+        return;
+    }
+
+    #pragma omp parallel
+    {
+        int thread_count = omp_get_num_threads();
+        for (size_t stage_h = h; stage_h < n; stage_h <<= 1) {
+            size_t stride = stage_h << 1;
+            size_t blocks = n / stride;
+            int chunk = fwht_stage_chunk_for_blocks(blocks, thread_count);
+
+            #pragma omp for schedule(static, chunk)
+            for (size_t block = 0; block < blocks; ++block) {
+                size_t base = block * stride;
+
+#if defined(__GNUC__) || defined(__clang__)
+                if (block + 1 < blocks) {
+                    __builtin_prefetch(data + base + stride, 1, 3);
+                    __builtin_prefetch(data + base + stride + stage_h, 1, 3);
+                }
+#endif
+                fwht_process_range_f64(data + base, data + base + stage_h, stage_h);
+            }
+        }
+    }
+}
+
+static void fwht_combine_f64_parallel(double* even,
+                                      double* odd,
+                                      size_t count,
+                                      int depth,
+                                      int max_depth) {
+    if (count <= FWHT_RECURSIVE_CUTOFF || depth >= max_depth) {
+        fwht_process_range_f64(even, odd, count);
+        return;
+    }
+
+    size_t mid = count >> 1;
+
+    #pragma omp task shared(even, odd) if(depth < max_depth)
+    fwht_combine_f64_parallel(even, odd, mid, depth + 1, max_depth);
+
+    #pragma omp task shared(even, odd) if(depth < max_depth)
+    fwht_combine_f64_parallel(even + mid, odd + mid, count - mid, depth + 1, max_depth);
+
+    #pragma omp taskwait
+}
+
 static void fwht_butterfly_f64_recursive(double* data, size_t n, int depth, int max_depth) {
     if (n <= FWHT_RECURSIVE_CUTOFF) {
         fwht_butterfly_f64_base(data, n);
         return;
     }
-    
+
     size_t half = n >> 1;
-    
+
     #pragma omp task shared(data) if(depth < max_depth)
     fwht_butterfly_f64_recursive(data, half, depth + 1, max_depth);
-    
+
     #pragma omp task shared(data) if(depth < max_depth)
     fwht_butterfly_f64_recursive(data + half, half, depth + 1, max_depth);
-    
+
     #pragma omp taskwait
-    
-    fwht_process_block_f64(data, 0, half);
+
+    fwht_combine_f64_parallel(data, data + half, half, depth, max_depth);
 }
 
-/*
- * OpenMP entry point for double precision using recursive task-based parallelism.
- * Adaptive task depth for optimal scaling on systems with many cores.
- * 
- * NOTE: If already in a parallel region (nested parallelism), falls back to
- * sequential version to avoid deadlocks.
- */
 static void fwht_butterfly_f64_openmp(double* data, size_t n) {
     if (n < 2) {
         return;
     }
-    
-    /* Check if we're already in a parallel region (nested parallelism) */
-    #ifdef _OPENMP
+
+#ifdef _OPENMP
     if (omp_in_parallel()) {
-        /* Already in parallel region - use sequential version to avoid deadlock */
         fwht_butterfly_f64(data, n);
         return;
     }
-    #endif
-    
+#endif
+
+    if (n >= fwht_get_openmp_stage_threshold()) {
+        fwht_butterfly_f64_parallel_stage(data, n);
+        return;
+    }
+
     #pragma omp parallel
     {
         #pragma omp single
         {
-            /* Calculate adaptive task depth based on thread count */
             int num_threads = omp_get_num_threads();
-            int max_depth = 2;  /* Minimum depth for small thread counts */
-            
-            /* For larger thread counts, scale depth adaptively */
-            if (num_threads >= 4) {
-                /* Calculate log2(num_threads) */
-                int log_threads = 0;
-                int t = num_threads;
-                while (t > 1) {
-                    t >>= 1;
-                    log_threads++;
-                }
-                max_depth = log_threads + 2;  /* +2 for good load balancing */
-            }
-            
+            int max_depth = fwht_openmp_task_depth(num_threads);
+
             fwht_butterfly_f64_recursive(data, n, 0, max_depth);
         }
     }
@@ -1307,6 +1497,15 @@ fwht_context_t* fwht_create_context(const fwht_config_t* config) {
     } else {
         ctx->config = fwht_default_config();
     }
+
+#ifdef _OPENMP
+    if (fwht_has_openmp()) {
+        fwht_backend_t backend = ctx->config.backend;
+        if (backend == FWHT_BACKEND_OPENMP || backend == FWHT_BACKEND_AUTO) {
+            fwht_openmp_warmup_once();
+        }
+    }
+#endif
     
     return ctx;
 }

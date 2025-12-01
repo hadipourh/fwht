@@ -78,6 +78,10 @@ fwht.transform(data)
 print(data)  # Transformed coefficients
 ```
 
+### Backend tuning (optional)
+
+`pyfwht` inherits the libfwht dispatcher thresholds. Run `make tune-backend` in the repository root to benchmark CPU vs OpenMP on your host and produce `meta/backend_threshold.json`; when the file exists, `Backend.AUTO` automatically uses the calibrated crossover sizes (otherwise it falls back to the default 2^13 / 2^20 heuristic).
+
 ### Boolean Function Analysis
 
 ```python

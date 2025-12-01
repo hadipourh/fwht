@@ -85,6 +85,8 @@ SHARED_LIB = $(LIB_DIR)/$(LIB_NAME).so
 TEST_BIN = $(BUILD_DIR)/test_correctness
 CLI_SRC = $(TOOLS_DIR)/fwht_cli.c
 CLI_BIN = $(BUILD_DIR)/fwht_cli
+TUNER_SRC = $(TOOLS_DIR)/backend_tuner.c
+TUNER_BIN = $(BUILD_DIR)/backend_tuner
 EXAMPLE_SRC = $(EXAMPLES_DIR)/example_basic.c
 EXAMPLE_BIN = $(EXAMPLES_DIR)/example_basic
 EXAMPLE2_SRC = $(EXAMPLES_DIR)/example_boolean_packed.c
@@ -179,7 +181,7 @@ endif
 # Build Targets
 # ============================================================================
 
-.PHONY: all clean test install lib static shared directories bench cli
+.PHONY: all clean test install lib static shared directories bench cli tune-backend
 
 ifeq ($(RUN_TESTS),1)
 all: directories lib test
@@ -199,6 +201,11 @@ lib: static shared
 
 # Build command-line utility
 cli: directories lib $(CLI_BIN)
+
+# Run backend tuning utility
+tune-backend: directories lib $(TUNER_BIN)
+	@echo "Running backend tuning utility..."
+	@$(TUNER_BIN)
 
 # Static library
 static: directories $(STATIC_LIB)
@@ -229,6 +236,10 @@ endif
 $(CLI_BIN): $(CLI_SRC) $(SHARED_LIB)
 	@echo "Building CLI tool: $@"
 	$(CC) $(CFLAGS) $< -L$(LIB_DIR) -lfwht $(CUDA_LDFLAGS) -lm -o $@ -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
+
+$(TUNER_BIN): $(TUNER_SRC) $(STATIC_LIB)
+	@echo "Building backend tuning tool: $@"
+	$(CC) $(CFLAGS) $< -L$(LIB_DIR) -lfwht -lm -o $@ -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
 
 # Compile source files
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
