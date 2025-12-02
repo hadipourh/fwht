@@ -19,4 +19,6 @@ extern "C" {
     #include <fwht_backend.c>
     #include <fwht_batch.c>
     #include <fwht_sbox.c>
+    #include <fwht_simd_avx2.c>
+    #include <fwht_simd_neon.c>
 }

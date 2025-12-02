@@ -122,6 +122,15 @@ else
     HAS_CUDA = 0
 endif
 
+# Check whether nvcc is usable with our flags (e.g., supports -std=c++17)
+ifeq ($(HAS_CUDA),1)
+NVCC_TEST_OK := $(shell echo "int main(){}" > /tmp/nvcc_test_$$.cu && \
+	$(NVCC) $(NVCCFLAGS) -c /tmp/nvcc_test_$$.cu -o /tmp/nvcc_test_$$.o >/dev/null 2>&1 && \
+	echo 1 || echo 0; rm -f /tmp/nvcc_test_$$.cu /tmp/nvcc_test_$$.o)
+else
+NVCC_TEST_OK := 0
+endif
+
 ifeq ($(UNAME_S),Darwin)
     # macOS
     SHARED_FLAGS = -dynamiclib
@@ -152,24 +161,26 @@ else ifeq ($(UNAME_S),Linux)
     endif
 endif
 
-# CUDA configuration
+# CUDA configuration (only enable if nvcc exists and passes probe)
 ifeq ($(HAS_CUDA),1)
-    ifndef NO_CUDA
-        USE_CUDA = 1
-        CFLAGS += -DUSE_CUDA
-        CXXFLAGS += -DUSE_CUDA
+	ifndef NO_CUDA
+		ifeq ($(NVCC_TEST_OK),1)
+				USE_CUDA = 1
+				CFLAGS += -DUSE_CUDA
+				CXXFLAGS += -DUSE_CUDA
 		NVCCFLAGS += -DUSE_CUDA
 		CUDA_LDFLAGS = -L/usr/local/cuda/lib64 -lcudart
 		CUDA_INCFLAGS = -I/usr/local/cuda/include
-        # Try to detect CUDA path
-        CUDA_PATH := $(shell dirname $(shell dirname $(shell which nvcc)))
-        ifneq ($(CUDA_PATH),)
+				# Try to detect CUDA path
+				CUDA_PATH := $(shell dirname $(shell dirname $(shell which nvcc)))
+				ifneq ($(CUDA_PATH),)
 			CUDA_LDFLAGS = -L$(CUDA_PATH)/lib64 -lcudart
 			CUDA_INCFLAGS = -I$(CUDA_PATH)/include
-        endif
+				endif
 		CFLAGS += $(CUDA_INCFLAGS)
 		CXXFLAGS += $(CUDA_INCFLAGS)
-    endif
+		endif
+	endif
 endif
 
 EXAMPLE_TARGETS = $(EXAMPLE_BIN) $(EXAMPLE2_BIN) $(EXAMPLE3_BIN)
@@ -181,7 +192,7 @@ endif
 # Build Targets
 # ============================================================================
 
-.PHONY: all clean test install lib static shared directories bench cli tune-backend
+.PHONY: all clean test install lib static shared directories bench cli tune-backend ffht-bench
 
 ifeq ($(RUN_TESTS),1)
 all: directories lib test
@@ -285,12 +296,22 @@ else
 endif
 	@echo "Run with: ./build/fwht_bench [options]"
 
+# Build FFHT vs libfwht comparison benchmark (CPU-only, single-threaded)
+.PHONY: ffht-bench
+ffht-bench: directories lib
+	@echo "Building FFHT vs libfwht benchmarks..."
+	$(MAKE) -C $(BENCH_DIR) ffht
+	@echo "Run with (on x86-64 host):"
+	@echo "  cd bench && LD_LIBRARY_PATH=../lib ./compare_ffht_fwht      # float comparison"
+	@echo "  cd bench && LD_LIBRARY_PATH=../lib ./compare_ffht_fwht_fp64 # fp64 comparison"
+
 .PHONY: sbox-bench
 sbox-bench: directories lib $(BUILD_DIR)/bench_sbox_lat
 	@echo "Running S-box LAT benchmark"
 	$(BUILD_DIR)/bench_sbox_lat
 
-$(BUILD_DIR)/bench_sbox_lat: $(TEST_DIR)/bench_sbox_lat.c $(STATIC_LIB)
+
+$(BUILD_DIR)/bench_sbox_lat: $(BENCH_DIR)/bench_sbox_lat.c $(STATIC_LIB)
 	@echo "Building S-box LAT benchmark: $@"
 	$(CC) $(CFLAGS) $< -L$(LIB_DIR) -lfwht $(CUDA_LDFLAGS) $(LDFLAGS) -lm -o $@ -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
 
@@ -367,6 +388,7 @@ clean:
 	@echo "Cleaning build artifacts..."
 	rm -rf $(BUILD_DIR) $(LIB_DIR)
 	rm -f $(EXAMPLE_BIN) $(EXAMPLE2_BIN) $(EXAMPLE3_BIN) $(EXAMPLE4_BIN)
+	rm -f $(BENCH_DIR)/tmp/*.bin || true
 
 # Install library (requires sudo on most systems)
 install: lib

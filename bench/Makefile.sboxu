@@ -9,8 +9,9 @@ TARGET := $(BUILD_DIR)/compare_sboxu_fwht
 PLATFORM_FILE := $(BUILD_DIR)/.platform
 FWHT_STATIC := $(ROOT_DIR)/lib/libfwht.a
 
-COMPARE_SRC := $(ROOT_DIR)/tests/compare_sboxu_fwht.cpp
-SBOXU_DIR := $(ROOT_DIR)/sboxU/sboxU/sboxU_cython
+COMPARE_SRC := $(ROOT_DIR)/bench/compare_sboxu_fwht.cpp
+SBOXU_DIR := $(ROOT_DIR)/otherlibs/sboxU/sboxU/sboxU_cython
+
 SBOXU_SRCS := \
 	$(SBOXU_DIR)/sboxu_cpp_diff_lin.cpp \
 	$(SBOXU_DIR)/sboxu_cpp_utils.cpp

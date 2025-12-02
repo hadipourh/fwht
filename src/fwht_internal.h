@@ -31,6 +31,18 @@ extern "C" {
 #endif
 
 /* ============================================================================
+ * CPU SIMD Extensions
+ * ============================================================================ */
+
+#if defined(__x86_64__) && defined(__AVX2__)
+void fwht_butterfly_i32_avx2(int32_t* data, size_t n);
+#endif
+
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+void fwht_butterfly_i32_neon(int32_t* data, size_t n);
+#endif
+
+/* ============================================================================
  * CUDA Backend Functions (implemented in fwht_cuda.cu)
  * ============================================================================ */
 

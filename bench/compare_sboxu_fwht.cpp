@@ -30,8 +30,8 @@ struct BenchResult {
 static std::vector<BenchResult> g_bench_results;
 
 #include "fwht.h"
-#include "../sboxU/sboxU/sboxU_cython/sboxu_cpp.hpp"
-#include "../sboxU/sboxU/sboxU_cython/sboxu_cpp_diff_lin.hpp"
+#include "../otherlibs/sboxU/sboxU/sboxU_cython/sboxu_cpp.hpp"
+#include "../otherlibs/sboxU/sboxU/sboxU_cython/sboxu_cpp_diff_lin.hpp"
 
 // Simple assert helper
 static void die(const char* msg) {

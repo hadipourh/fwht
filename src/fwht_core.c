@@ -482,7 +482,6 @@ static int fwht_butterfly_i32_recursive_safe(int32_t* data, size_t n) {
  * Main entry point for single-threaded CPU FWHT.
  */
 static void fwht_butterfly_i32(int32_t* data, size_t n) {
-    fwht_report_simd_mode();
     fwht_butterfly_i32_recursive_cpu(data, n);
 }
 
@@ -1012,7 +1011,11 @@ fwht_status_t fwht_i32_backend(int32_t* data, size_t n, fwht_backend_t backend) 
     switch (backend) {
         case FWHT_BACKEND_CPU:
             fwht_report_simd_mode();
+        #if defined(__x86_64__) && defined(__AVX2__)
+            fwht_butterfly_i32_avx2(data, n);
+        #else
             fwht_butterfly_i32(data, n);
+        #endif
             return FWHT_SUCCESS;
         
         case FWHT_BACKEND_CPU_SAFE:
