@@ -39,3 +39,4 @@ bench/tmp/
 
 # Generic Python caches
 **/__pycache__/
+otherlibs/
