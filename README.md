@@ -43,13 +43,21 @@ The Fast Walsh-Hadamard Transform computes the Walsh spectrum of k-variable Bool
 
 ## Build and Install
 
+### Quick installation setup
+
 - Prerequisites: C99 compiler, `make`; optional OpenMP toolchain; optional CUDA toolkit when GPU support is desired
 - Default build (library + regression tests): `make`
-- Focused targets: `make lib`, `make test`, `make test-gpu`, `make openmp`, `make NO_CUDA=1`
+- Focused targets: `make lib`, `make cli`, `make test`, `make test-gpu`, `make openmp`, `make NO_CUDA=1`
 - CUDA architectures: `make` now emits SASS for `sm_70 75 80 86 89 90` plus a PTX fallback by default; override with `CUDA_ARCH_LIST="80 90" make` (or any space-separated list) to target a custom subset, or set it empty to fall back to the historical `-arch=sm_80` default.
 - Installation (optional): `sudo make install` installs headers and libraries into `/usr/local`
 
 Build outputs are placed in `build/` (executables) and `lib/` (libraries).
+
+### Custom installation setup
+
+By default *fwht* libs, header and CLI binary are installed under `/usr/local`. In order to specify a custom installation path, one can do the following:
+- If you are using bash: `echo "export FWHT_INSTALL_PREFIX=/My/Custom/Install/Path" >> $HOME/.bashrc`
+- If you are using zsh: `echo "export FWHT_INSTALL_PREFIX=/My/Custom/Install/Path" >> $HOME/.zshrc`
 
 ## Library Usage
 
