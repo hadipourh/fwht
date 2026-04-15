@@ -30,16 +30,15 @@
 extern "C" {
 #endif
 
+/* Internal backend selection helpers. */
+fwht_backend_t fwht_recommend_batch_backend(size_t n, size_t batch_size);
+
 /* ============================================================================
  * CPU SIMD Extensions
  * ============================================================================ */
 
 #if defined(__x86_64__) && defined(__AVX2__)
 void fwht_butterfly_i32_avx2(int32_t* data, size_t n);
-#endif
-
-#if defined(__ARM_NEON) || defined(__ARM_NEON__)
-void fwht_butterfly_i32_neon(int32_t* data, size_t n);
 #endif
 
 /* ============================================================================

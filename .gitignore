@@ -36,6 +36,7 @@ python/RELEASE.md
 python/examples/benchmark_pyfwht_vs_daolib.txt
 todos.txt
 bench/tmp/
+draft/
 
 # Generic Python caches
 **/__pycache__/

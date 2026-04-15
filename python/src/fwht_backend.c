@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <limits.h>
 
 #define FWHT_DEFAULT_OPENMP_THRESHOLD 8192u
 #define FWHT_DEFAULT_GPU_THRESHOLD (1u << 20)
@@ -92,6 +93,16 @@ static void fwht_try_load_thresholds(void) {
     fwht_parse_threshold(buffer, "gpu_threshold", &fwht_gpu_threshold, 1024u);
 
     free(buffer);
+}
+
+static size_t fwht_saturating_mul_size(size_t a, size_t b) {
+    if (a == 0 || b == 0) {
+        return 0;
+    }
+    if (a > SIZE_MAX / b) {
+        return SIZE_MAX;
+    }
+    return a * b;
 }
 
 /* Forward declarations for CUDA functions */
@@ -161,6 +172,32 @@ fwht_backend_t fwht_recommend_backend(size_t n) {
     }
     
     /* Use CPU for small transforms */
+    return FWHT_BACKEND_CPU;
+}
+
+/*
+ * Recommend backend for batched host workloads.
+ *
+ * Keep this intentionally simple: reuse the existing per-machine thresholds,
+ * but apply them to total batch work rather than only per-transform size.
+ */
+fwht_backend_t fwht_recommend_batch_backend(size_t n, size_t batch_size) {
+    if (batch_size <= 1) {
+        return fwht_recommend_backend(n);
+    }
+
+    fwht_try_load_thresholds();
+
+    size_t total_work = fwht_saturating_mul_size(n, batch_size);
+
+    if (total_work >= fwht_gpu_threshold && fwht_has_gpu()) {
+        return FWHT_BACKEND_GPU;
+    }
+
+    if (total_work >= fwht_openmp_threshold && fwht_has_openmp()) {
+        return FWHT_BACKEND_OPENMP;
+    }
+
     return FWHT_BACKEND_CPU;
 }
 

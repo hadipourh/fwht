@@ -1539,7 +1539,7 @@ fwht_status_t fwht_batch_i32(fwht_context_t* ctx, int32_t** data_array,
     
     /* Auto-select backend if needed */
     if (backend == FWHT_BACKEND_AUTO) {
-        backend = fwht_recommend_backend(n);
+        backend = fwht_recommend_batch_backend(n, (size_t)batch_size);
     }
     
 #ifdef USE_CUDA
@@ -1554,7 +1554,7 @@ fwht_status_t fwht_batch_i32(fwht_context_t* ctx, int32_t** data_array,
     
     /* CPU batch: parallelize with OpenMP if available */
 #ifdef _OPENMP
-    if (backend == FWHT_BACKEND_OPENMP || batch_size > 4) {
+    if (backend == FWHT_BACKEND_OPENMP) {
         fwht_status_t first_error = FWHT_SUCCESS;
         
         /* Disable nested parallelism to prevent deadlocks */
@@ -1612,7 +1612,7 @@ fwht_status_t fwht_batch_f64(fwht_context_t* ctx, double** data_array,
     
     /* Auto-select backend if needed */
     if (backend == FWHT_BACKEND_AUTO) {
-        backend = fwht_recommend_backend(n);
+        backend = fwht_recommend_batch_backend(n, (size_t)batch_size);
     }
     
 #ifdef USE_CUDA
@@ -1627,7 +1627,7 @@ fwht_status_t fwht_batch_f64(fwht_context_t* ctx, double** data_array,
     
     /* CPU batch: parallelize with OpenMP if available */
 #ifdef _OPENMP
-    if (backend == FWHT_BACKEND_OPENMP || batch_size > 4) {
+    if (backend == FWHT_BACKEND_OPENMP) {
         fwht_status_t first_error = FWHT_SUCCESS;
         
         /* Disable nested parallelism to prevent deadlocks */

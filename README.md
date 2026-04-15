@@ -2,7 +2,7 @@
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
-High-performance C99 library for computing the Fast Walsh-Hadamard Transform (FWHT), a fundamental tool in cryptanalysis and Boolean function analysis. The library provides multiple backend implementations (vectorized single-threaded CPU, OpenMP, and CUDA) with automatic selection based on problem size, offering optimal performance across different hardware configurations.
+High-performance C99 library for computing the Fast Walsh-Hadamard Transform (FWHT), a fundamental tool in cryptanalysis and Boolean function analysis. The library provides multiple backend implementations (vectorized single-threaded CPU, OpenMP, and CUDA) with automatic selection based on problem size, providing strong performance across a wide range of hardware configurations.
 
 <p align="center">
   <img src="examples/butterfly.svg" alt="FWHT Butterfly Diagram" width="200">
@@ -11,14 +11,14 @@ High-performance C99 library for computing the Fast Walsh-Hadamard Transform (FW
 ## Key Features
 
 - **Multiple Backends**: Vectorized CPU (AVX2/SSE2/NEON), OpenMP multi-threading, CUDA GPU acceleration
-- **Multi-Precision GPU**: int32, fp64, fp32 (30× faster), fp16 Tensor Cores (up to 54× faster with PyTorch DLPack) with automatic precision selection
+- **Multi-Precision GPU**: int32, fp64, fp32, and optional fp16 Tensor Core paths on supported NVIDIA GPUs; benchmarked speedups are workload- and hardware-dependent
 - **Automatic Backend Selection**: Chooses optimal implementation based on problem size and available hardware
 - **Memory Efficient**: In-place algorithm with `O(log n)` stack space, cache-aligned allocations
 - **High Performance**:
   - CPU: Up to 5 GOps/s with SIMD (AVX2/NEON)
-  - OpenMP: Near-linear scaling on multi-core systems
-  - GPU: Up to **1115 GOps/s** on RTX 4090 (fp16 Tensor Cores with PyTorch DLPack)
-  - Persistent GPU contexts eliminate malloc/free overhead (5-10× speedup)
+  - OpenMP: Strong scaling on multi-core systems in benchmarked regimes
+  - GPU: Benchmarked up to **1115 GOps/s** on RTX 4090 in the fp16 PyTorch/DLPack path
+  - Persistent GPU contexts can eliminate repeated malloc/free overhead in throughput-oriented workloads
 - **Vectorized Batch Processing**: SIMD-accelerated batch API processes multiple transforms simultaneously (ideal for cryptanalysis)
 - **Bit-packed Boolean WHT**: High-level API to compute WHT from 1-bit packed truth tables (32× memory savings) with CUDA support for n ≤ 64K
 - **Boolean GPU contexts**: `fwht_gpu_boolean_context_{create,compute,destroy}` keep packed truth tables on device so repeated S-box transforms skip PCIe transfers and `cudaMalloc`
@@ -37,9 +37,9 @@ The Fast Walsh-Hadamard Transform computes the Walsh spectrum of k-variable Bool
 - **Divide-and-conquer**: Recursive with cache-efficient base cases (512-element cutoff fits in L1)
 - **Multi-backend architecture**:
   - **CPU**: SIMD vectorization (AVX2/SSE2/NEON auto-detected), software prefetching, cache-aligned allocations
-  - **OpenMP**: Task-based recursive parallelism for multi-core scaling
+  - **OpenMP**: Hybrid recursive/task and stage-parallel execution, depending on transform size
   - **GPU**: Persistent buffers, async transfers, shared memory kernels
-  - **Auto-tuning**: Runtime backend selection based on problem size and hardware
+  - **Auto-tuning**: Threshold-based runtime backend selection informed by problem size, hardware availability, and optional tuning data
 
 ## Build and Install
 
@@ -118,11 +118,11 @@ fwht_batch_i32_cuda(data_i32, n, batch_size);
 double* data_f64 = malloc(n * batch_size * sizeof(double));
 fwht_batch_f64_cuda(data_f64, n, batch_size);
 
-/* Float32 precision (balanced, 25× faster than fp64) */
+/* Float32 precision (higher throughput than fp64 on supported GPUs) */
 float* data_f32 = malloc(n * batch_size * sizeof(float));
 fwht_batch_f32_cuda(data_f32, n, batch_size);
 
-/* FP16 Tensor Cores (ML, up to 54× faster with PyTorch DLPack, requires SM 7.0+) */
+/* FP16 Tensor Cores (ML-oriented path, benchmark-dependent speedups, requires SM 7.0+) */
 uint16_t* d_in_fp16;   /* Device pointer to fp16 data */
 uint16_t* d_out_fp16;  /* Device pointer for results */
 cudaMalloc(&d_in_fp16, n * batch_size * sizeof(uint16_t));
@@ -136,13 +136,13 @@ int status = fwht_batch_f16_cuda_device(d_in_fp16, d_out_fp16, n, batch_size);
 
 - `fwht_batch_i32_cuda_device()` - int32 on device
 - `fwht_batch_f64_cuda_device()` - float64 on device
-- `fwht_batch_f32_cuda_device()` - float32 on device (25× faster)
-- `fwht_batch_f16_cuda_device()` - float16 Tensor Cores (up to 54× faster with PyTorch DLPack)
+- `fwht_batch_f32_cuda_device()` - float32 on device
+- `fwht_batch_f16_cuda_device()` - float16 Tensor Cores on supported GPUs
 
 **FP16 Tensor Core Notes:**
 
 - Requires NVIDIA GPU with SM 7.0+ (Volta, Turing, Ampere, Ada, Hopper)
-- Provides 30-54× speedup vs fp64 (54× with PyTorch DLPack zero-copy) with small precision loss (~12% of results differ by ±1-4)
+- Benchmarked speedups versus fp64 vary substantially with device, batch size, and data path; the largest gains appear in zero-copy PyTorch/DLPack workflows
 - Ideal for ML training/inference, NOT for cryptanalysis requiring bit-exact results
 - Automatic runtime warning on first use (suppressible via `FWHT_SILENCE_FP16_WARNING=1`)
 
@@ -197,7 +197,6 @@ if (fwht_has_gpu()) {
 /* Optional performance tuning */
 fwht_gpu_set_block_size(256);         /* Override auto-tuned block size */
 fwht_gpu_set_multi_shuffle(true);     /* Enable warp-shuffle optimization */
-fwht_gpu_set_chunked(true);           /* Enable chunked kernel for large n */
 fwht_gpu_set_profiling(true);         /* Collect H2D/kernel/D2H timing */
 
 /* Get profiling metrics after a transform */
@@ -309,12 +308,12 @@ fwht.transform(data)  # In-place, auto-selects best backend
 - Automatic backend selection (CPU SIMD, OpenMP, CUDA)
 - Multi-precision GPU support:
   - fp64 (cryptographic precision, ~1e-15 error)
-  - fp32 (balanced mode, ~1e-6 error, 30× faster than fp64)
-  - fp16 (ML/Tensor Cores, ~1e-3 error, up to 54× faster than fp64 with PyTorch DLPack)
+  - fp32 (balanced mode, ~1e-6 error, with substantially higher throughput than fp64 on supported GPUs)
+  - fp16 (ML/Tensor Cores, benchmark-dependent speedups with reduced precision)
 - Support for `int8`, `int32`, and `float64` data types
 - Boolean function utilities for cryptanalysis
-- **GPU acceleration: up to 1115 GOps/s** on RTX 4090 (fp16 Tensor Core mode with PyTorch DLPack)
-- DLPack support for zero-copy PyTorch/JAX integration (81× faster than NumPy for fp16)
+- **GPU acceleration:** benchmarked up to 1115 GOps/s on RTX 4090 in the fp16 PyTorch/DLPack path
+- DLPack support for zero-copy PyTorch/JAX integration; benchmarked workloads can be dramatically faster than the NumPy copy-based path
 - Tensor Core kernels for n=256, 512, 1024, **4096** (Meta-inspired implementation)
 
 See [`python/README.md`](python/README.md) for complete documentation, API reference, and FP16 precision characteristics.

@@ -84,7 +84,7 @@ Because every stage performs `n` additions/subtractions, the total work satisfie
 
 ## 5. CPU Techniques Inside libfwht
 
-1. **SIMD (Single Instruction, Multiple Data):** AVX2/AVX-512 on x86 and NEON/SVE on ARM allow one instruction to update multiple butterflies. We schedule data so each vector register always holds a contiguous group of elements.
+1. **SIMD (Single Instruction, Multiple Data):** AVX2/SSE2 on x86 and NEON on ARM allow one instruction to update multiple butterflies. We schedule data so each vector register always holds a contiguous group of elements.
 2. **Cache-friendly batching:** `fwht_i32_batch` and `fwht_f64_batch` operate on many signals of the same length. Keeping the working set resident in the L1/L2 caches removes most memory stalls.
 3. **Bit-packed Boolean kernels:** Functions such as `fwht_boolean_packed` and `fwht_boolean_batch` compress 32 or 64 Boolean values into a single machine word. We rely on the hardware `popcount` instruction (population count, i.e., number of ones) to accumulate correlation sums faster than unpacked arithmetic.
 

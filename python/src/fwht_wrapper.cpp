@@ -19,6 +19,18 @@ extern "C" {
     #include <fwht_backend.c>
     #include <fwht_batch.c>
     #include <fwht_sbox.c>
-    #include <fwht_simd_avx2.c>
-    #include <fwht_simd_neon.c>
+
+        /*
+         * Optional SIMD translation units are not present in every source layout.
+         * The core file already contains the required scalar/SIMD fallbacks, so
+         * include these extra units only when the selected tree provides them.
+         */
+        #if defined(__has_include)
+            #if __has_include(<fwht_simd_avx2.c>)
+                #include <fwht_simd_avx2.c>
+            #endif
+            #if __has_include(<fwht_simd_neon.c>)
+                #include <fwht_simd_neon.c>
+            #endif
+        #endif
 }

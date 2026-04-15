@@ -126,7 +126,7 @@ static void fwht_print_simd_banner(void) {
 #elif defined(FWHT_HAVE_NEON)
     fprintf(stderr, "[libfwht] CPU backend: NEON vector path active\n");
 #else
-    fprintf(stderr, "[libfwht] CPU backend: scalar path active\n");
+    fprintf(stderr, "[libfwht] CPU backend: scalar path active (compiler auto-vectorization enabled)\n");
 #endif
 }
 
@@ -317,8 +317,8 @@ static inline void fwht_process_range_f64(double* FWHT_RESTRICT even,
     }
 #endif
 
-#if defined(FWHT_HAVE_NEON)
-    /* NEON: process 2 doubles at a time (128-bit = 2×64-bit) */
+#if defined(FWHT_HAVE_NEON) && (defined(__aarch64__) || defined(_M_ARM64))
+    /* AArch64 NEON: process 2 doubles at a time (128-bit = 2×64-bit) */
     if (count >= 2) {
         size_t neon_end = count & (size_t)~1;
         for (; j < neon_end; j += 2) {
@@ -1542,7 +1542,7 @@ fwht_status_t fwht_batch_i32(fwht_context_t* ctx, int32_t** data_array,
     
     /* Auto-select backend if needed */
     if (backend == FWHT_BACKEND_AUTO) {
-        backend = fwht_recommend_backend(n);
+        backend = fwht_recommend_batch_backend(n, (size_t)batch_size);
     }
     
 #ifdef USE_CUDA
@@ -1557,7 +1557,7 @@ fwht_status_t fwht_batch_i32(fwht_context_t* ctx, int32_t** data_array,
     
     /* CPU batch: parallelize with OpenMP if available */
 #ifdef _OPENMP
-    if (backend == FWHT_BACKEND_OPENMP || batch_size > 4) {
+    if (backend == FWHT_BACKEND_OPENMP) {
         fwht_status_t first_error = FWHT_SUCCESS;
         
         /* Disable nested parallelism to prevent deadlocks */
@@ -1615,7 +1615,7 @@ fwht_status_t fwht_batch_f64(fwht_context_t* ctx, double** data_array,
     
     /* Auto-select backend if needed */
     if (backend == FWHT_BACKEND_AUTO) {
-        backend = fwht_recommend_backend(n);
+        backend = fwht_recommend_batch_backend(n, (size_t)batch_size);
     }
     
 #ifdef USE_CUDA
@@ -1630,7 +1630,7 @@ fwht_status_t fwht_batch_f64(fwht_context_t* ctx, double** data_array,
     
     /* CPU batch: parallelize with OpenMP if available */
 #ifdef _OPENMP
-    if (backend == FWHT_BACKEND_OPENMP || batch_size > 4) {
+    if (backend == FWHT_BACKEND_OPENMP) {
         fwht_status_t first_error = FWHT_SUCCESS;
         
         /* Disable nested parallelism to prevent deadlocks */

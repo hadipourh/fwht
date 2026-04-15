@@ -30,6 +30,9 @@
 extern "C" {
 #endif
 
+/* Internal backend selection helpers. */
+fwht_backend_t fwht_recommend_batch_backend(size_t n, size_t batch_size);
+
 /* ============================================================================
  * CUDA Backend Functions (implemented in fwht_cuda.cu)
  * ============================================================================ */

@@ -8,16 +8,16 @@ Python bindings for the high-performance libfwht library, providing Fast Walsh-H
 
 - **Zero-copy NumPy integration**: Direct operation on NumPy arrays without data copying
 - **Multiple backends**: Automatic selection or explicit choice of CPU (SIMD), OpenMP, or GPU (CUDA)
-- **Multi-precision GPU**: fp64 (cryptographic), fp32 (balanced), fp16 (maximum speed, up to 54× faster with PyTorch DLPack)
+- **Multi-precision GPU**: fp64 (cryptographic), fp32 (balanced), fp16 (maximum speed on supported Tensor Core GPUs; measured gains are workload-dependent)
 - **All data types**: Support for `int8`, `int32`, and `float64` with overflow protection
 - **Boolean function analysis**: Convenience functions for cryptographic applications
 - **Bit-packed Boolean WHT**: Compute WHT directly from `uint64`-packed truth tables via `fwht.boolean_packed()` (set `backend=fwht.Backend.GPU` to expand on the device for n ≤ 65536)
 - **GPU-resident Boolean contexts**: repeated `fwht.boolean_packed(..., backend=fwht.Backend.GPU)` calls automatically reuse the CUDA buffers via `fwht_gpu_boolean_context_*`, eliminating per-call allocations on S-box workloads
 - **High performance**: 
-  - GPU fp16: Up to **1115 GOps/s** on RTX 4090 with PyTorch DLPack (zero-copy, exceeds Meta by 38%)
-  - GPU fp32: Up to **625 GOps/s** with perfect accuracy
+  - GPU fp16: Benchmarked up to **1115 GOps/s** on RTX 4090 with PyTorch DLPack (zero-copy)
+  - GPU fp32: Benchmarked up to **625 GOps/s** in the same test environment
   - Tensor Core kernels: n=256, 512, 1024, 2048, 4096, 8192, 16384, **32768** (Meta-inspired implementation)
-  - DLPack support: 81× faster than NumPy for fp16 batch operations
+  - DLPack support: benchmarked up to 81× faster than the NumPy copy-based path for fp16 batch operations
   - Recursive cache-efficient algorithm (512-element L1-optimized base case)
   - Task-based OpenMP parallelism (2-3× speedup on 4-8 cores)
   - Software prefetching and cache-aligned memory allocation
@@ -443,7 +443,7 @@ python benchmark_all_precisions_fixed.py
 
 ### FP16 Precision Characteristics (Important!)
 
-**FP16 provides up to ~35× speedup** (with PyTorch DLPack) but uses limited precision (11-bit mantissa). This is the **expected tradeoff** for Tensor Core acceleration.
+**FP16 provides large speedups in the best GPU-resident workflows** (benchmarked up to ~35× with PyTorch DLPack) but uses limited precision. This is the expected tradeoff for Tensor Core acceleration.
 
 #### **Measured Accuracy (RTX 4090, CUDA 12.6):**
 
@@ -457,8 +457,8 @@ FP16 roundoff is therefore inconsequential for Boolean cryptanalysis yet still b
 | Precision | Speed (relative) | Accuracy snapshot | Best For |
 |-----------|------------------|-------------------|----------|
 | **fp64**  | 1× (baseline)    | Bit-exact         | Cryptanalysis, validation |
-| **fp32**  | ~30× faster      | ~1e-6 error       | Balanced workloads |
-| **fp16**  | ~35× faster      | Boolean exact, ≤1.3e-1 abs. err on floats | ML/AI with PyTorch DLPack |
+| **fp32**  | benchmark-dependent, often far faster than fp64 | ~1e-6 error       | Balanced workloads |
+| **fp16**  | benchmark-dependent, up to ~35× in measured DLPack runs | Boolean exact, ≤1.3e-1 abs. err on floats | ML/AI with PyTorch DLPack |
 
 **Important**: For fp16 throughput, keep data on the GPU (PyTorch DLPack). The NumPy path includes H2D/D2H copies and is orders of magnitude slower.
 
@@ -484,7 +484,7 @@ When you first use fp16, you'll see a one-time warning:
 ╔═══════════════════════════════════════════════════════════════════════════╗
 ║ FP16 Tensor Core Precision Notice                                         ║
 ╠═══════════════════════════════════════════════════════════════════════════╣
-║ Using float16 Tensor Cores provides 25-36× speedup                        ║
+║ Using float16 Tensor Cores can provide very large speedups                ║
 ║                                                                           ║
 ║ Observed behavior (RTX 4090, CUDA 12.6):                                  ║
 ║   • Boolean {-1,+1} inputs remain bit-exact                               ║

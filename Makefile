@@ -27,9 +27,9 @@ RUN_TESTS ?= 0
 CC = gcc
 CXX = g++
 NVCC = nvcc
-BASE_CFLAGS = -std=c99 -O3 -Wall -Wextra -pedantic -pthread -I$(INCLUDE_DIR)
+BASE_CFLAGS = -std=c99 -O3 -Wall -Wextra -pedantic -pthread -I$(INCLUDE_DIR) -Wno-pass-failed
 CFLAGS = $(BASE_CFLAGS)
-BASE_CXXFLAGS = -O3 -Wall -Wextra -pedantic -pthread -I$(INCLUDE_DIR)
+BASE_CXXFLAGS = -O3 -Wall -Wextra -pedantic -pthread -I$(INCLUDE_DIR) -Wno-pass-failed
 CXXFLAGS = $(BASE_CXXFLAGS)
 ifeq ($(NO_SIMD),1)
 	CFLAGS +=
@@ -67,6 +67,9 @@ NVCC_ARCH_FLAGS := -arch=sm_80
 endif
 NVCCFLAGS += $(NVCC_ARCH_FLAGS)
 LDFLAGS =
+
+# Platform Detection (early, needed for conditional source lists)
+UNAME_S := $(shell uname -s)
 
 # Directories
 SRC_DIR = src
@@ -112,7 +115,7 @@ TEST_OBJS = $(patsubst $(TEST_DIR)/%.c,$(BUILD_DIR)/%.o,$(TEST_SRCS))
 # Platform Detection
 # ============================================================================
 
-UNAME_S := $(shell uname -s)
+# (UNAME_S is set earlier, before source file lists)
 
 # Detect CUDA availability
 CUDA_AVAILABLE := $(shell which nvcc 2>/dev/null)
