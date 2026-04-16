@@ -723,67 +723,41 @@ TEST(direct_batch_i32) {
 }
 
 TEST(direct_batch_i32_simd) {
-    /* Test batch API with size that could trigger SIMD path (n < 256, batch >= 8) */
-#if defined(__ARM_NEON) || defined(__ARM_NEON__)
-    /* NEON path works - test it */
+    /* Test batch API with size that triggers SIMD path (n < 256, batch >= SIMD_WIDTH) */
     const size_t n = 16;
     const size_t batch_size = 8;
     
     /* Use simple stack-allocated arrays to avoid alignment issues */
     int32_t data[8][16];
+    int32_t reference[8][16];
     int32_t* batch[8];
     
     /* Initialize */
     for (size_t i = 0; i < batch_size; i++) {
         batch[i] = data[i];
+        int32_t lane_value = (int32_t)(i + 1);
         for (size_t j = 0; j < n; j++) {
-            data[i][j] = (j % 2 == 0) ? 1 : -1;
+            data[i][j] = (((j + i) & 1u) == 0) ? lane_value : -lane_value;
+            reference[i][j] = data[i][j];
         }
     }
     
-    /* Compute reference for first batch element */
-    int32_t reference[16];
-    memcpy(reference, data[0], n * sizeof(int32_t));
-    fwht_status_t ref_status = fwht_i32(reference, n);
-    ASSERT_STATUS(ref_status, FWHT_SUCCESS);
+    /* Compute scalar references for every batch lane */
+    for (size_t i = 0; i < batch_size; i++) {
+        fwht_status_t ref_status = fwht_i32(reference[i], n);
+        ASSERT_STATUS(ref_status, FWHT_SUCCESS);
+    }
     
     /* Batch transform */
     fwht_status_t status = fwht_i32_batch(batch, n, batch_size);
     ASSERT_STATUS(status, FWHT_SUCCESS);
     
-    /* Verify first batch element matches reference */
-    for (size_t j = 0; j < n; j++) {
-        ASSERT_EQ_I32(data[0][j], reference[j]);
-    }
-#elif defined(__AVX2__)
-    /* AVX2 path has known issues - skip for now */
-    printf("SKIPPED (AVX2 SIMD batch has known issues - use context API for large batches)\n");
-#else
-    /* No SIMD - test should work with scalar fallback */
-    const size_t n = 16;
-    const size_t batch_size = 8;
-    
-    int32_t data[8][16];
-    int32_t* batch[8];
-    
+    /* Verify every batch lane matches its scalar reference */
     for (size_t i = 0; i < batch_size; i++) {
-        batch[i] = data[i];
         for (size_t j = 0; j < n; j++) {
-            data[i][j] = (j % 2 == 0) ? 1 : -1;
+            ASSERT_EQ_I32(data[i][j], reference[i][j]);
         }
     }
-    
-    int32_t reference[16];
-    memcpy(reference, data[0], n * sizeof(int32_t));
-    fwht_i32(reference, n);
-    
-    fwht_status_t status = fwht_i32_batch(batch, n, batch_size);
-    ASSERT_STATUS(status, FWHT_SUCCESS);
-    
-    for (size_t j = 0; j < n; j++) {
-        ASSERT_EQ_I32(data[0][j], reference[j]);
-    }
-#endif
 }
 
 TEST(direct_batch_f64) {
@@ -811,15 +785,100 @@ TEST(direct_batch_f64) {
 }
 
 TEST(vectorized_batch_i32_simd_path) {
-    /* Test SIMD vectorized batch path (AVX2/NEON) with n < 256 and batch >= 8 */
-    /* NOTE: Disabled due to segfault on some systems. Use direct_batch_i32 instead. */
-    printf("SKIPPED (disabled due to platform compatibility issues)\n");
+    /* Test SIMD vectorized batch path with n=128, batch=16 */
+    const size_t n = 128;
+    const size_t batch_size = 16;
+    
+    /* Allocate arrays */
+    int32_t** batch = (int32_t**)malloc(batch_size * sizeof(int32_t*));
+    int32_t* reference = (int32_t*)malloc(batch_size * n * sizeof(int32_t));
+    ASSERT(batch != NULL, "Failed to allocate batch array");
+    ASSERT(reference != NULL, "Failed to allocate reference batch");
+    
+    for (size_t i = 0; i < batch_size; i++) {
+        batch[i] = (int32_t*)malloc(n * sizeof(int32_t));
+        ASSERT(batch[i] != NULL, "Failed to allocate transform array");
+        
+        /* Initialize with pattern */
+        int32_t lane_value = (int32_t)(i + 1);
+        for (size_t j = 0; j < n; j++) {
+            batch[i][j] = (((j + i) & 1u) == 0) ? lane_value : -lane_value;
+            reference[i * n + j] = batch[i][j];
+        }
+    }
+    
+    /* Compute scalar references for every batch lane */
+    for (size_t i = 0; i < batch_size; i++) {
+        fwht_status_t ref_status = fwht_i32(reference + i * n, n);
+        ASSERT_STATUS(ref_status, FWHT_SUCCESS);
+    }
+    
+    /* Batch transform */
+    fwht_status_t status = fwht_i32_batch(batch, n, batch_size);
+    ASSERT_STATUS(status, FWHT_SUCCESS);
+    
+    /* Verify every batch lane */
+    for (size_t i = 0; i < batch_size; i++) {
+        for (size_t j = 0; j < n; j++) {
+            ASSERT_EQ_I32(batch[i][j], reference[i * n + j]);
+        }
+    }
+    
+    /* Cleanup */
+    for (size_t i = 0; i < batch_size; i++) {
+        free(batch[i]);
+    }
+    free(batch);
+    free(reference);
 }
 
 TEST(vectorized_batch_i32_small_sizes) {
-    /* Test SIMD path with multiple small sizes (all < 256) */
-    /* NOTE: Disabled due to segfault on some systems. Coverage provided by direct_batch tests. */
-    printf("SKIPPED (disabled due to platform compatibility issues)\n");
+    /* Test SIMD batch with various small sizes */
+    const size_t test_sizes[] = {16, 32, 64, 128};
+    const size_t num_tests = sizeof(test_sizes) / sizeof(test_sizes[0]);
+    
+    for (size_t t = 0; t < num_tests; t++) {
+        const size_t n = test_sizes[t];
+        const size_t batch_size = 8;  /* Minimum for SIMD path */
+        
+        int32_t** batch = (int32_t**)malloc(batch_size * sizeof(int32_t*));
+        int32_t* reference = (int32_t*)malloc(batch_size * n * sizeof(int32_t));
+        ASSERT(batch != NULL, "Failed to allocate batch array");
+        ASSERT(reference != NULL, "Failed to allocate reference batch");
+        
+        for (size_t i = 0; i < batch_size; i++) {
+            batch[i] = (int32_t*)malloc(n * sizeof(int32_t));
+            ASSERT(batch[i] != NULL, "Failed to allocate transform");
+            
+            int32_t lane_value = (int32_t)(i + 1 + t);
+            for (size_t j = 0; j < n; j++) {
+                batch[i][j] = (((j + i + t) & 1u) == 0) ? lane_value : -lane_value;
+                reference[i * n + j] = batch[i][j];
+            }
+        }
+
+        for (size_t i = 0; i < batch_size; i++) {
+            fwht_status_t ref_status = fwht_i32(reference + i * n, n);
+            ASSERT_STATUS(ref_status, FWHT_SUCCESS);
+        }
+        
+        /* Transform */
+        fwht_status_t status = fwht_i32_batch(batch, n, batch_size);
+        ASSERT_STATUS(status, FWHT_SUCCESS);
+
+        for (size_t i = 0; i < batch_size; i++) {
+            for (size_t j = 0; j < n; j++) {
+                ASSERT_EQ_I32(batch[i][j], reference[i * n + j]);
+            }
+        }
+        
+        /* Cleanup */
+        for (size_t i = 0; i < batch_size; i++) {
+            free(batch[i]);
+        }
+        free(batch);
+        free(reference);
+    }
 }
 
 TEST(sbox_identity_matches_reference) {
