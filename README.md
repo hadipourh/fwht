@@ -20,8 +20,10 @@ High-performance C99 library for computing the Fast Walsh-Hadamard Transform (FW
   - GPU: Benchmarked up to **1115 GOps/s** on RTX 4090 in the fp16 PyTorch/DLPack path
   - Persistent GPU contexts can eliminate repeated malloc/free overhead in throughput-oriented workloads
 - **Vectorized Batch Processing**: SIMD-accelerated batch API processes multiple transforms simultaneously (ideal for cryptanalysis)
+- **Contiguous Batch APIs**: `fwht_batch_i32_contiguous` and `fwht_batch_f64_contiguous` skip pointer repacking and reuse persistent GPU buffers more effectively on repeated batches
 - **Bit-packed Boolean WHT**: High-level API to compute WHT from 1-bit packed truth tables (32× memory savings) with CUDA support for n ≤ 64K
 - **Boolean GPU contexts**: `fwht_gpu_boolean_context_{create,compute,destroy}` keep packed truth tables on device so repeated S-box transforms skip PCIe transfers and `cudaMalloc`
+- **GPU Verification Helper**: `fwht_gpu_mask_correlation_u8` computes batched byte-mask correlation sums on CUDA for verification-style workloads
 - **Overflow Safety**: Optional runtime overflow detection for int32 transforms with `fwht_i32_safe()`
 - **Flexible API**: In-place transforms, out-of-place helpers, batch processing, Boolean function utilities, device-pointer APIs
 - **Bit-packed Boolean GPU path**: `fwht_boolean_packed_backend(..., FWHT_BACKEND_GPU)` keeps inputs packed over PCIe and expands to ±1 on device for `n ≤ 64K`

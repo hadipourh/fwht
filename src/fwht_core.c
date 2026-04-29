@@ -555,7 +555,12 @@ static void fwht_butterfly_f64(double* data, size_t n) {
  * ========================================================================== */
 
 #define FWHT_RECURSIVE_CUTOFF 512
-#define FWHT_OPENMP_DEFAULT_STAGE_THRESHOLD (SIZE_MAX)
+/* L2-sized tiles: 131072 doubles = 1 MiB, fits in L2 on most modern CPUs.
+ * Larger tiles reduce the number of memory-bound merge stages that follow the
+ * bootstrap phase.  The actual tile is capped downward by
+ * fwht_openmp_stage_tile_size() when there are not enough tiles for the
+ * requested thread count. */
+#define FWHT_OPENMP_DEFAULT_STAGE_THRESHOLD ((size_t)1 << 17)
 #define FWHT_OPENMP_DEFAULT_STAGE_CHUNK 0
 
 static size_t fwht_openmp_stage_threshold_cache = 0;
@@ -572,13 +577,13 @@ static size_t fwht_get_openmp_stage_threshold(void) {
     if (env && *env) {
         char* endptr = NULL;
         unsigned long long value = strtoull(env, &endptr, 10);
-        if (endptr != env && value >= (unsigned long long)(FWHT_RECURSIVE_CUTOFF << 1)) {
+        if (endptr != env && value >= 2ull) {
             threshold = (size_t)value;
         }
     }
 
-    if (threshold < (size_t)(FWHT_RECURSIVE_CUTOFF << 1)) {
-        threshold = (size_t)(FWHT_RECURSIVE_CUTOFF << 1);
+    if (threshold < 2u) {
+        threshold = 2u;
     }
 
     fwht_openmp_stage_threshold_cache = threshold;
@@ -627,6 +632,48 @@ static int fwht_stage_chunk_for_blocks(size_t blocks, int thread_count) {
     return (int)per_thread;
 }
 
+static size_t fwht_floor_power_of_two(size_t value) {
+    size_t result = 1u;
+
+    while (result <= (value >> 1)) {
+        result <<= 1;
+    }
+
+    return result;
+}
+
+static size_t fwht_openmp_stage_tile_size(size_t n, int thread_count) {
+    size_t tile_size = fwht_get_openmp_stage_threshold();
+    size_t min_blocks = (thread_count > 1) ? (size_t)thread_count : 1u;
+
+    if (tile_size > n) {
+        tile_size = n;
+    }
+    tile_size = fwht_floor_power_of_two(tile_size);
+
+    while (tile_size > 2u && (n / tile_size) < min_blocks) {
+        tile_size >>= 1;
+    }
+
+    return tile_size;
+}
+
+static size_t fwht_stage_segments_per_block(size_t stage_h,
+                                            size_t blocks,
+                                            int thread_count) {
+    size_t target_chunks = (thread_count > 1) ? (size_t)thread_count * 4u : 1u;
+    size_t segments = (target_chunks + blocks - 1u) / blocks;
+
+    if (segments < 1u) {
+        segments = 1u;
+    }
+    if (segments > stage_h) {
+        segments = stage_h;
+    }
+
+    return segments;
+}
+
 static int fwht_openmp_task_depth(int num_threads) {
     if (num_threads < 4) {
         return 2;
@@ -657,46 +704,65 @@ static void fwht_butterfly_i32_base(int32_t* data, size_t n) {
 }
 
 static void fwht_butterfly_i32_parallel_stage(int32_t* data, size_t n) {
-    size_t stage_threshold = fwht_get_openmp_stage_threshold();
-    size_t h = 1;
-
-    while (h < n && (h << 1) < stage_threshold) {
-        size_t stride = h << 1;
-        for (size_t i = 0; i < n; i += stride) {
-#if defined(__GNUC__) || defined(__clang__)
-            if (i + stride < n) {
-                __builtin_prefetch(data + i + stride, 1, 3);
-                __builtin_prefetch(data + i + stride + h, 1, 3);
-            }
-#endif
-            fwht_process_range_i32(data + i, data + i + h, h);
-        }
-        h <<= 1;
-    }
-
-    if (h >= n) {
-        return;
-    }
-
     #pragma omp parallel
     {
         int thread_count = omp_get_num_threads();
-        for (size_t stage_h = h; stage_h < n; stage_h <<= 1) {
+        size_t tile_size = fwht_openmp_stage_tile_size(n, thread_count);
+        size_t tile_blocks = n / tile_size;
+        int tile_chunk = fwht_stage_chunk_for_blocks(tile_blocks, thread_count);
+
+        /* Bootstrap: each tile is a full WHT using the cache-oblivious
+         * recursive CPU kernel so that the per-tile work stays L2-resident. */
+        #pragma omp for schedule(static, tile_chunk)
+        for (size_t block = 0; block < tile_blocks; ++block) {
+            fwht_butterfly_i32_recursive_cpu(data + block * tile_size, tile_size);
+        }
+
+        /* Merge stages: butterfly between adjacent tiles, doubling each time. */
+        for (size_t stage_h = tile_size; stage_h < n; stage_h <<= 1) {
             size_t stride = stage_h << 1;
             size_t blocks = n / stride;
-            int chunk = fwht_stage_chunk_for_blocks(blocks, thread_count);
 
-            #pragma omp for schedule(static, chunk)
-            for (size_t block = 0; block < blocks; ++block) {
-                size_t base = block * stride;
+            if (blocks >= (size_t)thread_count) {
+                int chunk = fwht_stage_chunk_for_blocks(blocks, thread_count);
+
+                #pragma omp for schedule(static, chunk)
+                for (size_t block = 0; block < blocks; ++block) {
+                    size_t base = block * stride;
 
 #if defined(__GNUC__) || defined(__clang__)
-                if (block + 1 < blocks) {
-                    __builtin_prefetch(data + base + stride, 1, 3);
-                    __builtin_prefetch(data + base + stride + stage_h, 1, 3);
-                }
+                    if (block + 1 < blocks) {
+                        __builtin_prefetch(data + base + stride, 1, 3);
+                        __builtin_prefetch(data + base + stride + stage_h, 1, 3);
+                    }
 #endif
-                fwht_process_range_i32(data + base, data + base + stage_h, stage_h);
+                    fwht_process_range_i32(data + base, data + base + stage_h, stage_h);
+                }
+            } else {
+                size_t segments_per_block = fwht_stage_segments_per_block(stage_h,
+                                                                          blocks,
+                                                                          thread_count);
+                size_t segment_len = (stage_h + segments_per_block - 1u) / segments_per_block;
+                size_t total_segments = blocks * segments_per_block;
+
+                #pragma omp for schedule(static)
+                for (size_t segment = 0; segment < total_segments; ++segment) {
+                    size_t block = segment / segments_per_block;
+                    size_t segment_index = segment % segments_per_block;
+                    size_t offset = segment_index * segment_len;
+
+                    if (offset < stage_h) {
+                        size_t count = stage_h - offset;
+                        size_t base = block * stride + offset;
+
+                        if (count > segment_len) {
+                            count = segment_len;
+                        }
+                        fwht_process_range_i32(data + base,
+                                               data + base + stage_h,
+                                               count);
+                    }
+                }
             }
         }
     }
@@ -787,46 +853,65 @@ static void fwht_butterfly_f64_base(double* data, size_t n) {
 }
 
 static void fwht_butterfly_f64_parallel_stage(double* data, size_t n) {
-    size_t stage_threshold = fwht_get_openmp_stage_threshold();
-    size_t h = 1;
-
-    while (h < n && (h << 1) < stage_threshold) {
-        size_t stride = h << 1;
-        for (size_t i = 0; i < n; i += stride) {
-#if defined(__GNUC__) || defined(__clang__)
-            if (i + stride < n) {
-                __builtin_prefetch(data + i + stride, 1, 3);
-                __builtin_prefetch(data + i + stride + h, 1, 3);
-            }
-#endif
-            fwht_process_range_f64(data + i, data + i + h, h);
-        }
-        h <<= 1;
-    }
-
-    if (h >= n) {
-        return;
-    }
-
     #pragma omp parallel
     {
         int thread_count = omp_get_num_threads();
-        for (size_t stage_h = h; stage_h < n; stage_h <<= 1) {
+        size_t tile_size = fwht_openmp_stage_tile_size(n, thread_count);
+        size_t tile_blocks = n / tile_size;
+        int tile_chunk = fwht_stage_chunk_for_blocks(tile_blocks, thread_count);
+
+        /* Bootstrap: each tile is a full WHT using the cache-oblivious
+         * recursive CPU kernel so that the per-tile work stays L2-resident. */
+        #pragma omp for schedule(static, tile_chunk)
+        for (size_t block = 0; block < tile_blocks; ++block) {
+            fwht_butterfly_f64_recursive_cpu(data + block * tile_size, tile_size);
+        }
+
+        /* Merge stages: butterfly between adjacent tiles, doubling each time. */
+        for (size_t stage_h = tile_size; stage_h < n; stage_h <<= 1) {
             size_t stride = stage_h << 1;
             size_t blocks = n / stride;
-            int chunk = fwht_stage_chunk_for_blocks(blocks, thread_count);
 
-            #pragma omp for schedule(static, chunk)
-            for (size_t block = 0; block < blocks; ++block) {
-                size_t base = block * stride;
+            if (blocks >= (size_t)thread_count) {
+                int chunk = fwht_stage_chunk_for_blocks(blocks, thread_count);
+
+                #pragma omp for schedule(static, chunk)
+                for (size_t block = 0; block < blocks; ++block) {
+                    size_t base = block * stride;
 
 #if defined(__GNUC__) || defined(__clang__)
-                if (block + 1 < blocks) {
-                    __builtin_prefetch(data + base + stride, 1, 3);
-                    __builtin_prefetch(data + base + stride + stage_h, 1, 3);
-                }
+                    if (block + 1 < blocks) {
+                        __builtin_prefetch(data + base + stride, 1, 3);
+                        __builtin_prefetch(data + base + stride + stage_h, 1, 3);
+                    }
 #endif
-                fwht_process_range_f64(data + base, data + base + stage_h, stage_h);
+                    fwht_process_range_f64(data + base, data + base + stage_h, stage_h);
+                }
+            } else {
+                size_t segments_per_block = fwht_stage_segments_per_block(stage_h,
+                                                                          blocks,
+                                                                          thread_count);
+                size_t segment_len = (stage_h + segments_per_block - 1u) / segments_per_block;
+                size_t total_segments = blocks * segments_per_block;
+
+                #pragma omp for schedule(static)
+                for (size_t segment = 0; segment < total_segments; ++segment) {
+                    size_t block = segment / segments_per_block;
+                    size_t segment_index = segment % segments_per_block;
+                    size_t offset = segment_index * segment_len;
+
+                    if (offset < stage_h) {
+                        size_t count = stage_h - offset;
+                        size_t base = block * stride + offset;
+
+                        if (count > segment_len) {
+                            count = segment_len;
+                        }
+                        fwht_process_range_f64(data + base,
+                                               data + base + stage_h,
+                                               count);
+                    }
+                }
             }
         }
     }
@@ -1480,7 +1565,124 @@ fwht_status_t fwht_boolean_batch(const uint64_t** packed_batch, int32_t** wht_ba
 
 struct fwht_context {
     fwht_config_t config;
+#ifdef USE_CUDA
+    fwht_gpu_context_t* gpu_ctx;
+    size_t gpu_ctx_max_n;
+    size_t gpu_ctx_max_batch_size;
+#endif
 };
+
+static int fwht_i32_views_are_contiguous(int32_t** data_array,
+                                         size_t n,
+                                         int batch_size,
+                                         int32_t** out_base) {
+    int32_t* base;
+    int i;
+
+    if (data_array == NULL || batch_size <= 0 || data_array[0] == NULL) {
+        return 0;
+    }
+
+    base = data_array[0];
+    for (i = 0; i < batch_size; ++i) {
+        if (data_array[i] != base + (size_t)i * n) {
+            return 0;
+        }
+    }
+
+    if (out_base != NULL) {
+        *out_base = base;
+    }
+    return 1;
+}
+
+static int fwht_f64_views_are_contiguous(double** data_array,
+                                         size_t n,
+                                         int batch_size,
+                                         double** out_base) {
+    double* base;
+    int i;
+
+    if (data_array == NULL || batch_size <= 0 || data_array[0] == NULL) {
+        return 0;
+    }
+
+    base = data_array[0];
+    for (i = 0; i < batch_size; ++i) {
+        if (data_array[i] != base + (size_t)i * n) {
+            return 0;
+        }
+    }
+
+    if (out_base != NULL) {
+        *out_base = base;
+    }
+    return 1;
+}
+
+#ifdef USE_CUDA
+static fwht_status_t fwht_context_ensure_gpu_capacity(fwht_context_t* ctx,
+                                                      size_t n,
+                                                      size_t batch_size) {
+    fwht_gpu_context_t* next_ctx;
+
+    if (ctx == NULL) {
+        return FWHT_ERROR_NULL_POINTER;
+    }
+    if (ctx->gpu_ctx != NULL &&
+        ctx->gpu_ctx_max_n >= n &&
+        ctx->gpu_ctx_max_batch_size >= batch_size) {
+        return FWHT_SUCCESS;
+    }
+
+    next_ctx = fwht_gpu_context_create(n, batch_size);
+    if (next_ctx == NULL) {
+        return fwht_has_gpu() ? FWHT_ERROR_OUT_OF_MEMORY : FWHT_ERROR_BACKEND_UNAVAILABLE;
+    }
+
+    fwht_gpu_context_destroy(ctx->gpu_ctx);
+    ctx->gpu_ctx = next_ctx;
+    ctx->gpu_ctx_max_n = n;
+    ctx->gpu_ctx_max_batch_size = batch_size;
+    return FWHT_SUCCESS;
+}
+#endif
+
+#ifdef _OPENMP
+typedef struct {
+    bool active;
+    int old_dynamic;
+    int old_num_threads;
+} fwht_openmp_scope_t;
+
+static void fwht_openmp_scope_begin(fwht_openmp_scope_t* scope,
+                                    fwht_backend_t backend,
+                                    int num_threads) {
+    scope->active = false;
+    scope->old_dynamic = 0;
+    scope->old_num_threads = 0;
+
+    if (backend != FWHT_BACKEND_OPENMP || num_threads <= 0 || !fwht_has_openmp()) {
+        return;
+    }
+
+    scope->active = true;
+    scope->old_dynamic = omp_get_dynamic();
+    scope->old_num_threads = omp_get_max_threads();
+
+    omp_set_dynamic(0);
+    omp_set_num_threads(num_threads);
+}
+
+static void fwht_openmp_scope_end(const fwht_openmp_scope_t* scope) {
+    if (!scope->active) {
+        return;
+    }
+
+    omp_set_dynamic(scope->old_dynamic);
+    omp_set_num_threads(scope->old_num_threads);
+}
+#endif
 
 fwht_config_t fwht_default_config(void) {
     fwht_config_t config;
@@ -1494,6 +1696,8 @@ fwht_config_t fwht_default_config(void) {
 fwht_context_t* fwht_create_context(const fwht_config_t* config) {
     fwht_context_t* ctx = (fwht_context_t*)malloc(sizeof(fwht_context_t));
     if (ctx == NULL) return NULL;
+
+    memset(ctx, 0, sizeof(*ctx));
     
     if (config != NULL) {
         ctx->config = *config;
@@ -1515,6 +1719,9 @@ fwht_context_t* fwht_create_context(const fwht_config_t* config) {
 
 void fwht_destroy_context(fwht_context_t* ctx) {
     if (ctx != NULL) {
+#ifdef USE_CUDA
+        fwht_gpu_context_destroy(ctx->gpu_ctx);
+#endif
         free(ctx);
     }
 }
@@ -1523,20 +1730,207 @@ fwht_status_t fwht_transform_i32(fwht_context_t* ctx, int32_t* data, size_t n) {
     if (ctx == NULL) {
         return fwht_i32(data, n);
     }
-    return fwht_i32_backend(data, n, ctx->config.backend);
+
+    fwht_backend_t backend = ctx->config.backend;
+    if (backend == FWHT_BACKEND_AUTO) {
+        backend = fwht_recommend_backend(n);
+    }
+
+#ifdef _OPENMP
+    fwht_openmp_scope_t scope;
+    fwht_openmp_scope_begin(&scope, backend, ctx->config.num_threads);
+    fwht_status_t status = fwht_i32_backend(data, n, backend);
+    fwht_openmp_scope_end(&scope);
+    return status;
+#else
+    return fwht_i32_backend(data, n, backend);
+#endif
 }
 
 fwht_status_t fwht_transform_f64(fwht_context_t* ctx, double* data, size_t n) {
     if (ctx == NULL) {
         return fwht_f64(data, n);
     }
-    return fwht_f64_backend(data, n, ctx->config.backend);
+
+    fwht_backend_t backend = ctx->config.backend;
+    if (backend == FWHT_BACKEND_AUTO) {
+        backend = fwht_recommend_backend(n);
+    }
+
+#ifdef _OPENMP
+    fwht_openmp_scope_t scope;
+    fwht_openmp_scope_begin(&scope, backend, ctx->config.num_threads);
+    fwht_status_t status = fwht_f64_backend(data, n, backend);
+    fwht_openmp_scope_end(&scope);
+    return status;
+#else
+    return fwht_f64_backend(data, n, backend);
+#endif
+}
+
+fwht_status_t fwht_batch_i32_contiguous(fwht_context_t* ctx,
+                                        int32_t* data,
+                                        size_t n,
+                                        int batch_size) {
+    fwht_backend_t backend;
+
+    if (data == NULL) return FWHT_ERROR_NULL_POINTER;
+    if (batch_size <= 0) return FWHT_ERROR_INVALID_ARGUMENT;
+    if (n == 0 || (n & (n - 1)) != 0) return FWHT_ERROR_INVALID_SIZE;
+
+    backend = (ctx != NULL) ? ctx->config.backend : FWHT_BACKEND_AUTO;
+    if (backend == FWHT_BACKEND_AUTO) {
+        backend = fwht_recommend_batch_backend(n, (size_t)batch_size);
+    }
+
+#ifdef USE_CUDA
+    if (backend == FWHT_BACKEND_GPU) {
+        if (ctx != NULL) {
+            fwht_status_t status = fwht_context_ensure_gpu_capacity(ctx, n, (size_t)batch_size);
+            if (status != FWHT_SUCCESS) {
+                return status;
+            }
+            return fwht_gpu_context_compute_i32(ctx->gpu_ctx, data, n, (size_t)batch_size);
+        }
+        return fwht_batch_i32_cuda(data, n, (size_t)batch_size);
+    }
+#endif
+
+#ifdef _OPENMP
+    if (backend == FWHT_BACKEND_OPENMP) {
+        fwht_status_t first_error = FWHT_SUCCESS;
+        fwht_openmp_scope_t scope;
+        fwht_openmp_scope_begin(&scope, backend, (ctx != NULL) ? ctx->config.num_threads : 0);
+
+    #if _OPENMP >= 200805
+        int old_max_active_levels = omp_get_max_active_levels();
+        if (old_max_active_levels < 1) {
+            old_max_active_levels = 1;
+        }
+        omp_set_max_active_levels(1);
+    #else
+        int old_nested = omp_get_nested();
+        omp_set_nested(0);
+    #endif
+
+        #pragma omp parallel for schedule(static)
+        for (int i = 0; i < batch_size; ++i) {
+            fwht_status_t status = fwht_i32_backend(data + (size_t)i * n, n, FWHT_BACKEND_CPU);
+            if (status != FWHT_SUCCESS) {
+                #pragma omp critical
+                {
+                    if (first_error == FWHT_SUCCESS) {
+                        first_error = status;
+                    }
+                }
+            }
+        }
+
+    #if _OPENMP >= 200805
+        omp_set_max_active_levels(old_max_active_levels);
+    #else
+        omp_set_nested(old_nested);
+    #endif
+
+        fwht_openmp_scope_end(&scope);
+        return first_error;
+    }
+#endif
+
+    for (int i = 0; i < batch_size; ++i) {
+        fwht_status_t status = fwht_i32_backend(data + (size_t)i * n, n, backend);
+        if (status != FWHT_SUCCESS) return status;
+    }
+
+    return FWHT_SUCCESS;
+}
+
+fwht_status_t fwht_batch_f64_contiguous(fwht_context_t* ctx,
+                                        double* data,
+                                        size_t n,
+                                        int batch_size) {
+    fwht_backend_t backend;
+
+    if (data == NULL) return FWHT_ERROR_NULL_POINTER;
+    if (batch_size <= 0) return FWHT_ERROR_INVALID_ARGUMENT;
+    if (n == 0 || (n & (n - 1)) != 0) return FWHT_ERROR_INVALID_SIZE;
+
+    backend = (ctx != NULL) ? ctx->config.backend : FWHT_BACKEND_AUTO;
+    if (backend == FWHT_BACKEND_AUTO) {
+        backend = fwht_recommend_batch_backend(n, (size_t)batch_size);
+    }
+
+#ifdef USE_CUDA
+    if (backend == FWHT_BACKEND_GPU) {
+        if (ctx != NULL) {
+            fwht_status_t status = fwht_context_ensure_gpu_capacity(ctx, n, (size_t)batch_size);
+            if (status != FWHT_SUCCESS) {
+                return status;
+            }
+            return fwht_gpu_context_compute_f64(ctx->gpu_ctx, data, n, (size_t)batch_size);
+        }
+        return fwht_batch_f64_cuda(data, n, (size_t)batch_size);
+    }
+#endif
+
+#ifdef _OPENMP
+    if (backend == FWHT_BACKEND_OPENMP) {
+        fwht_status_t first_error = FWHT_SUCCESS;
+        fwht_openmp_scope_t scope;
+        fwht_openmp_scope_begin(&scope, backend, (ctx != NULL) ? ctx->config.num_threads : 0);
+
+    #if _OPENMP >= 200805
+        int old_max_active_levels = omp_get_max_active_levels();
+        if (old_max_active_levels < 1) {
+            old_max_active_levels = 1;
+        }
+        omp_set_max_active_levels(1);
+    #else
+        int old_nested = omp_get_nested();
+        omp_set_nested(0);
+    #endif
+
+        #pragma omp parallel for schedule(static)
+        for (int i = 0; i < batch_size; ++i) {
+            fwht_status_t status = fwht_f64_backend(data + (size_t)i * n, n, FWHT_BACKEND_CPU);
+            if (status != FWHT_SUCCESS) {
+                #pragma omp critical
+                {
+                    if (first_error == FWHT_SUCCESS) {
+                        first_error = status;
+                    }
+                }
+            }
+        }
+
+    #if _OPENMP >= 200805
+        omp_set_max_active_levels(old_max_active_levels);
+    #else
+        omp_set_nested(old_nested);
+    #endif
+
+        fwht_openmp_scope_end(&scope);
+        return first_error;
+    }
+#endif
+
+    for (int i = 0; i < batch_size; ++i) {
+        fwht_status_t status = fwht_f64_backend(data + (size_t)i * n, n, backend);
+        if (status != FWHT_SUCCESS) return status;
+    }
+
+    return FWHT_SUCCESS;
 }
 
 fwht_status_t fwht_batch_i32(fwht_context_t* ctx, int32_t** data_array, 
                              size_t n, int batch_size) {
+    int32_t* contiguous_data = NULL;
+
     if (data_array == NULL) return FWHT_ERROR_NULL_POINTER;
     if (batch_size == 0) return FWHT_ERROR_INVALID_ARGUMENT;
+    if (fwht_i32_views_are_contiguous(data_array, n, batch_size, &contiguous_data)) {
+        return fwht_batch_i32_contiguous(ctx, contiguous_data, n, batch_size);
+    }
     
     fwht_backend_t backend = (ctx != NULL) ? ctx->config.backend : FWHT_BACKEND_AUTO;
     
@@ -1559,6 +1953,8 @@ fwht_status_t fwht_batch_i32(fwht_context_t* ctx, int32_t** data_array,
 #ifdef _OPENMP
     if (backend == FWHT_BACKEND_OPENMP) {
         fwht_status_t first_error = FWHT_SUCCESS;
+        fwht_openmp_scope_t scope;
+        fwht_openmp_scope_begin(&scope, backend, (ctx != NULL) ? ctx->config.num_threads : 0);
         
         /* Disable nested parallelism to prevent deadlocks */
     #if _OPENMP >= 200805
@@ -1592,6 +1988,8 @@ fwht_status_t fwht_batch_i32(fwht_context_t* ctx, int32_t** data_array,
     #else
         omp_set_nested(old_nested);
     #endif
+
+        fwht_openmp_scope_end(&scope);
         
         return first_error;
     }
@@ -1608,8 +2006,13 @@ fwht_status_t fwht_batch_i32(fwht_context_t* ctx, int32_t** data_array,
 
 fwht_status_t fwht_batch_f64(fwht_context_t* ctx, double** data_array,
                              size_t n, int batch_size) {
+    double* contiguous_data = NULL;
+
     if (data_array == NULL) return FWHT_ERROR_NULL_POINTER;
     if (batch_size == 0) return FWHT_ERROR_INVALID_ARGUMENT;
+    if (fwht_f64_views_are_contiguous(data_array, n, batch_size, &contiguous_data)) {
+        return fwht_batch_f64_contiguous(ctx, contiguous_data, n, batch_size);
+    }
     
     fwht_backend_t backend = (ctx != NULL) ? ctx->config.backend : FWHT_BACKEND_AUTO;
     
@@ -1632,6 +2035,8 @@ fwht_status_t fwht_batch_f64(fwht_context_t* ctx, double** data_array,
 #ifdef _OPENMP
     if (backend == FWHT_BACKEND_OPENMP) {
         fwht_status_t first_error = FWHT_SUCCESS;
+        fwht_openmp_scope_t scope;
+        fwht_openmp_scope_begin(&scope, backend, (ctx != NULL) ? ctx->config.num_threads : 0);
         
         /* Disable nested parallelism to prevent deadlocks */
     #if _OPENMP >= 200805
@@ -1665,6 +2070,8 @@ fwht_status_t fwht_batch_f64(fwht_context_t* ctx, double** data_array,
     #else
         omp_set_nested(old_nested);
     #endif
+
+        fwht_openmp_scope_end(&scope);
         
         return first_error;
     }
@@ -1678,3 +2085,28 @@ fwht_status_t fwht_batch_f64(fwht_context_t* ctx, double** data_array,
     
     return FWHT_SUCCESS;
 }
+
+#ifndef USE_CUDA
+fwht_status_t fwht_gpu_mask_correlation_u8(const uint8_t* points,
+                                           size_t point_stride,
+                                           const uint8_t* oracle_bits,
+                                           const uint8_t* masks,
+                                           size_t mask_stride,
+                                           size_t mask_count,
+                                           size_t sample_count,
+                                           size_t mask_bytes,
+                                           uint8_t tail_mask,
+                                           int64_t* out_sums) {
+    (void)points;
+    (void)point_stride;
+    (void)oracle_bits;
+    (void)masks;
+    (void)mask_stride;
+    (void)mask_count;
+    (void)sample_count;
+    (void)mask_bytes;
+    (void)tail_mask;
+    (void)out_sums;
+    return FWHT_ERROR_BACKEND_UNAVAILABLE;
+}
+#endif

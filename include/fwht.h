@@ -443,8 +443,7 @@ fwht_status_t fwht_gpu_boolean_context_compute(fwht_gpu_boolean_context_t* ctx,
                                                int32_t* wht_out,
                                                size_t n);
 #endif /* __CUDACC__ || USE_CUDA */
-
-#endif
+#endif /* USE_CUDA */
 
 /* ============================================================================
  * ADVANCED API - OUT-OF-PLACE TRANSFORMS
@@ -515,6 +514,21 @@ fwht_status_t fwht_batch_i32(fwht_context_t* ctx, int32_t** data_array,
                              size_t n, int batch_size);
 fwht_status_t fwht_batch_f64(fwht_context_t* ctx, double** data_array,
                              size_t n, int batch_size);
+
+/*
+ * Batch transform for contiguous storage.
+ *
+ * Layout: data[0..n-1] is the first transform, data[n..2n-1] is the second,
+ * and so on for batch_size transforms.
+ */
+fwht_status_t fwht_batch_i32_contiguous(fwht_context_t* ctx,
+                                        int32_t* data,
+                                        size_t n,
+                                        int batch_size);
+fwht_status_t fwht_batch_f64_contiguous(fwht_context_t* ctx,
+                                        double* data,
+                                        size_t n,
+                                        int batch_size);
 
 /* ============================================================================
  * CONVENIENCE API - BOOLEAN FUNCTIONS
@@ -672,6 +686,26 @@ fwht_status_t fwht_boolean_packed_backend(const uint64_t* packed_bits, int32_t* 
  */
 fwht_status_t fwht_boolean_batch(const uint64_t** packed_batch, int32_t** wht_batch,
                                   size_t n, size_t batch_size);
+
+/*
+ * GPU helper for batched linear-mask verification work.
+ *
+ * Computes one signed correlation sum per mask against oracle_bits over the
+ * supplied sample points, where each mask sum is:
+ *   sum_i (+1 if oracle_bits[i] == <points[i], mask> else -1)
+ *
+ * Returns FWHT_ERROR_BACKEND_UNAVAILABLE when CUDA support is not present.
+ */
+fwht_status_t fwht_gpu_mask_correlation_u8(const uint8_t* points,
+                                           size_t point_stride,
+                                           const uint8_t* oracle_bits,
+                                           const uint8_t* masks,
+                                           size_t mask_stride,
+                                           size_t mask_count,
+                                           size_t sample_count,
+                                           size_t mask_bytes,
+                                           uint8_t tail_mask,
+                                           int64_t* out_sums);
 
 /* ============================================================================
  * UTILITY FUNCTIONS

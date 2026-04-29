@@ -34,6 +34,14 @@ extern "C" {
 fwht_backend_t fwht_recommend_batch_backend(size_t n, size_t batch_size);
 
 /* ============================================================================
+ * CPU SIMD Extensions
+ * ============================================================================ */
+
+#if defined(__x86_64__) && defined(__AVX2__)
+void fwht_butterfly_i32_avx2(int32_t* data, size_t n);
+#endif
+
+/* ============================================================================
  * CUDA Backend Functions (implemented in fwht_cuda.cu)
  * ============================================================================ */
 

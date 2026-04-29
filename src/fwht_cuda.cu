@@ -1591,6 +1591,260 @@ fwht_status_t fwht_gpu_memcpy_d2h(void* h_dst, const void* d_src, size_t bytes) 
     return FWHT_SUCCESS;
 }
 
+/* =========================================================================
+ * GPU MASK CORRELATION HELPER
+ * ========================================================================= */
+
+typedef struct {
+    bool ready;
+    cudaStream_t stream;
+    uint8_t* d_points;
+    size_t points_capacity_bytes;
+    uint8_t* d_masks;
+    size_t masks_capacity_bytes;
+    uint8_t* d_oracle_bits;
+    size_t oracle_capacity_bytes;
+    int64_t* d_sums;
+    size_t sums_capacity;
+} fwht_gpu_mask_corr_workspace_t;
+
+static fwht_gpu_mask_corr_workspace_t g_fwht_mask_corr_ws = {
+    false,
+    NULL,
+    NULL,
+    0,
+    NULL,
+    0,
+    NULL,
+    0,
+    NULL,
+    0
+};
+
+static fwht_status_t fwht_gpu_mask_corr_workspace_init(void) {
+    if (g_fwht_mask_corr_ws.ready) {
+        return FWHT_SUCCESS;
+    }
+
+    cudaError_t err = cudaStreamCreateWithFlags(&g_fwht_mask_corr_ws.stream,
+                                                cudaStreamNonBlocking);
+    if (err != cudaSuccess) {
+        g_fwht_mask_corr_ws.stream = NULL;
+        return fwht_cuda_report(err, __FILE__, __LINE__);
+    }
+
+    g_fwht_mask_corr_ws.ready = true;
+    return FWHT_SUCCESS;
+}
+
+static fwht_status_t fwht_gpu_mask_corr_reserve_bytes(void** device_ptr,
+                                                      size_t* capacity_bytes,
+                                                      size_t required_bytes) {
+    if (required_bytes == 0) {
+        return FWHT_SUCCESS;
+    }
+    if (*capacity_bytes >= required_bytes) {
+        return FWHT_SUCCESS;
+    }
+    if (*device_ptr != NULL) {
+        cudaFree(*device_ptr);
+        *device_ptr = NULL;
+        *capacity_bytes = 0;
+    }
+
+    cudaError_t err = cudaMalloc(device_ptr, required_bytes);
+    if (err != cudaSuccess) {
+        return fwht_cuda_report(err, __FILE__, __LINE__);
+    }
+
+    *capacity_bytes = required_bytes;
+    return FWHT_SUCCESS;
+}
+
+__global__ static void fwht_gpu_mask_correlation_kernel(const uint8_t* __restrict__ points,
+                                                        size_t point_stride,
+                                                        const uint8_t* __restrict__ oracle_bits,
+                                                        const uint8_t* __restrict__ masks,
+                                                        size_t mask_stride,
+                                                        size_t mask_count,
+                                                        size_t sample_count,
+                                                        size_t mask_bytes,
+                                                        uint8_t tail_mask,
+                                                        int64_t* __restrict__ out_sums) {
+    extern __shared__ long long shared_sums[];
+
+    size_t mask_index = blockIdx.x;
+    long long local_sum = 0;
+
+    if (mask_index >= mask_count) {
+        return;
+    }
+
+    const uint8_t* mask = masks + mask_index * mask_stride;
+    for (size_t sample_index = threadIdx.x;
+         sample_index < sample_count;
+         sample_index += blockDim.x) {
+        const uint8_t* point = points + sample_index * point_stride;
+        unsigned int parity = 0;
+
+        if (mask_bytes > 0) {
+            for (size_t byte_index = 0; byte_index + 1 < mask_bytes; ++byte_index) {
+                parity ^= (__popc((unsigned int)(point[byte_index] & mask[byte_index])) & 1u);
+            }
+            parity ^= (__popc((unsigned int)(point[mask_bytes - 1] &
+                                            mask[mask_bytes - 1] &
+                                            tail_mask)) & 1u);
+        }
+
+        local_sum += ((unsigned int)(oracle_bits[sample_index] & 1u) == parity) ? 1LL : -1LL;
+    }
+
+    shared_sums[threadIdx.x] = local_sum;
+    __syncthreads();
+
+    for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            shared_sums[threadIdx.x] += shared_sums[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0) {
+        out_sums[mask_index] = (int64_t)shared_sums[0];
+    }
+}
+
+fwht_status_t fwht_gpu_mask_correlation_u8(const uint8_t* points,
+                                           size_t point_stride,
+                                           const uint8_t* oracle_bits,
+                                           const uint8_t* masks,
+                                           size_t mask_stride,
+                                           size_t mask_count,
+                                           size_t sample_count,
+                                           size_t mask_bytes,
+                                           uint8_t tail_mask,
+                                           int64_t* out_sums) {
+    fwht_status_t status;
+    size_t points_bytes;
+    size_t masks_bytes;
+    size_t oracle_bytes;
+    size_t sums_bytes;
+    unsigned int threads = 256u;
+    cudaError_t err;
+
+    if (points == NULL || oracle_bits == NULL || masks == NULL || out_sums == NULL) {
+        return FWHT_ERROR_NULL_POINTER;
+    }
+    if (mask_count == 0 || sample_count == 0) {
+        return FWHT_SUCCESS;
+    }
+    if (mask_bytes == 0 || point_stride < mask_bytes || mask_stride < mask_bytes) {
+        return FWHT_ERROR_INVALID_ARGUMENT;
+    }
+
+    status = fwht_cuda_ensure_device_state();
+    if (status != FWHT_SUCCESS) {
+        return status;
+    }
+    status = fwht_gpu_mask_corr_workspace_init();
+    if (status != FWHT_SUCCESS) {
+        return status;
+    }
+
+    points_bytes = point_stride * sample_count;
+    masks_bytes = mask_stride * mask_count;
+    oracle_bytes = sample_count;
+    sums_bytes = mask_count * sizeof(*out_sums);
+
+    status = fwht_gpu_mask_corr_reserve_bytes((void**)&g_fwht_mask_corr_ws.d_points,
+                                              &g_fwht_mask_corr_ws.points_capacity_bytes,
+                                              points_bytes);
+    if (status != FWHT_SUCCESS) {
+        return status;
+    }
+    status = fwht_gpu_mask_corr_reserve_bytes((void**)&g_fwht_mask_corr_ws.d_masks,
+                                              &g_fwht_mask_corr_ws.masks_capacity_bytes,
+                                              masks_bytes);
+    if (status != FWHT_SUCCESS) {
+        return status;
+    }
+    status = fwht_gpu_mask_corr_reserve_bytes((void**)&g_fwht_mask_corr_ws.d_oracle_bits,
+                                              &g_fwht_mask_corr_ws.oracle_capacity_bytes,
+                                              oracle_bytes);
+    if (status != FWHT_SUCCESS) {
+        return status;
+    }
+    status = fwht_gpu_mask_corr_reserve_bytes((void**)&g_fwht_mask_corr_ws.d_sums,
+                                              &g_fwht_mask_corr_ws.sums_capacity,
+                                              sums_bytes);
+    if (status != FWHT_SUCCESS) {
+        return status;
+    }
+
+    err = cudaMemcpyAsync(g_fwht_mask_corr_ws.d_points,
+                          points,
+                          points_bytes,
+                          cudaMemcpyHostToDevice,
+                          g_fwht_mask_corr_ws.stream);
+    if (err != cudaSuccess) {
+        return fwht_cuda_report(err, __FILE__, __LINE__);
+    }
+    err = cudaMemcpyAsync(g_fwht_mask_corr_ws.d_masks,
+                          masks,
+                          masks_bytes,
+                          cudaMemcpyHostToDevice,
+                          g_fwht_mask_corr_ws.stream);
+    if (err != cudaSuccess) {
+        return fwht_cuda_report(err, __FILE__, __LINE__);
+    }
+    err = cudaMemcpyAsync(g_fwht_mask_corr_ws.d_oracle_bits,
+                          oracle_bits,
+                          oracle_bytes,
+                          cudaMemcpyHostToDevice,
+                          g_fwht_mask_corr_ws.stream);
+    if (err != cudaSuccess) {
+        return fwht_cuda_report(err, __FILE__, __LINE__);
+    }
+
+    while (threads > sample_count && threads > 32u) {
+        threads >>= 1;
+    }
+
+    fwht_gpu_mask_correlation_kernel<<<(unsigned int)mask_count,
+                                        threads,
+                                        threads * sizeof(long long),
+                                        g_fwht_mask_corr_ws.stream>>>(g_fwht_mask_corr_ws.d_points,
+                                                                      point_stride,
+                                                                      g_fwht_mask_corr_ws.d_oracle_bits,
+                                                                      g_fwht_mask_corr_ws.d_masks,
+                                                                      mask_stride,
+                                                                      mask_count,
+                                                                      sample_count,
+                                                                      mask_bytes,
+                                                                      tail_mask,
+                                                                      g_fwht_mask_corr_ws.d_sums);
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        return fwht_cuda_report(err, __FILE__, __LINE__);
+    }
+
+    err = cudaMemcpyAsync(out_sums,
+                          g_fwht_mask_corr_ws.d_sums,
+                          sums_bytes,
+                          cudaMemcpyDeviceToHost,
+                          g_fwht_mask_corr_ws.stream);
+    if (err != cudaSuccess) {
+        return fwht_cuda_report(err, __FILE__, __LINE__);
+    }
+
+    err = cudaStreamSynchronize(g_fwht_mask_corr_ws.stream);
+    if (err != cudaSuccess) {
+        return fwht_cuda_report(err, __FILE__, __LINE__);
+    }
+
+    return FWHT_SUCCESS;
+}
+
 /* ============================================================================
  * CORE WHT API
  * ============================================================================ */

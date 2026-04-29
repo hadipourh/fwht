@@ -140,8 +140,8 @@ ifeq ($(UNAME_S),Darwin)
     SHARED_EXT = .dylib
     # OpenMP on macOS (Homebrew)
     ifneq ($(NO_OPENMP),1)
-        OPENMP_CFLAGS = -Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include
-        OPENMP_CXXFLAGS = -Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include
+		OPENMP_CFLAGS = -Xpreprocessor -fopenmp -isystem /opt/homebrew/opt/libomp/include
+		OPENMP_CXXFLAGS = -Xpreprocessor -fopenmp -isystem /opt/homebrew/opt/libomp/include
         OPENMP_LDFLAGS = -L/opt/homebrew/opt/libomp/lib -lomp
         # Apply OpenMP flags by default
         CFLAGS += $(OPENMP_CFLAGS)
@@ -195,7 +195,7 @@ endif
 # Build Targets
 # ============================================================================
 
-.PHONY: all clean test install lib static shared directories bench cli tune-backend ffht-bench
+.PHONY: all clean test install lib static shared directories bench cli tune-backend ffht-bench fftw-bench
 
 ifeq ($(RUN_TESTS),1)
 all: directories lib test
@@ -307,6 +307,18 @@ ffht-bench: directories lib
 	@echo "Run with (on x86-64 host):"
 	@echo "  cd bench && LD_LIBRARY_PATH=../lib ./compare_ffht_fwht      # float comparison"
 	@echo "  cd bench && LD_LIBRARY_PATH=../lib ./compare_ffht_fwht_fp64 # fp64 comparison"
+
+# Build FFTW vs libfwht comparison benchmark (CPU-only, double precision)
+.PHONY: fftw-bench
+fftw-bench: directories lib
+	@echo "Building FFTW vs libfwht benchmark..."
+	$(MAKE) -C $(BENCH_DIR) fftw
+	@echo "Run with:"
+	@if [ "$(UNAME_S)" = "Darwin" ]; then \
+		echo "  cd bench && DYLD_LIBRARY_PATH=/opt/homebrew/opt/libomp/lib:../lib ./compare_fftw_fwht"; \
+	else \
+		echo "  cd bench && LD_LIBRARY_PATH=../lib ./compare_fftw_fwht"; \
+	fi
 
 .PHONY: sbox-bench
 sbox-bench: directories lib $(BUILD_DIR)/bench_sbox_lat

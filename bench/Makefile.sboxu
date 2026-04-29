@@ -68,7 +68,7 @@ endif
 endif
 
 ifneq ($(LIBOMP_INCDIR),)
-OMP_CFLAGS += -I$(LIBOMP_INCDIR)
+OMP_CFLAGS += -isystem $(LIBOMP_INCDIR)
 endif
 
 OMP_LINK_LIB := -lomp

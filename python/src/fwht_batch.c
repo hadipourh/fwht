@@ -31,7 +31,7 @@ static void* fwht_batch_aligned_alloc(size_t alignment, size_t size) {
     return NULL;
 #else
     /* Fallback: just use malloc (alignment not guaranteed but safe to free) */
-    (void)alignment;  /* Suppress unused parameter warning */
+    (void)alignment;
     return malloc(size);
 #endif
 }
@@ -183,12 +183,12 @@ static void fwht_f64_batch_avx2_kernel(double** FWHT_RESTRICT data_array,
 
 static void fwht_i32_batch_neon_kernel(int32_t** FWHT_RESTRICT data_array,
                                         size_t n, size_t batch_offset) {
-    const size_t simd_width = 4;  /* NEON: 4 int32s per register */
+    const size_t simd_width = 4;
     
     int32x4_t* lanes = (int32x4_t*)fwht_batch_aligned_alloc(16, n * sizeof(int32x4_t));
     if (!lanes) return;
     
-    /* Transpose */
+    /* Transpose: gather one element from each of 4 transforms */
     for (size_t i = 0; i < n; i++) {
         int32_t tmp[4];
         for (size_t j = 0; j < simd_width; j++) {
@@ -197,7 +197,7 @@ static void fwht_i32_batch_neon_kernel(int32_t** FWHT_RESTRICT data_array,
         lanes[i] = vld1q_s32(tmp);
     }
     
-    /* Butterfly passes */
+    /* Butterfly passes - vectorized across 4 transforms */
     for (size_t h = 1; h < n; h <<= 1) {
         size_t stride = h << 1;
         
@@ -215,7 +215,7 @@ static void fwht_i32_batch_neon_kernel(int32_t** FWHT_RESTRICT data_array,
         }
     }
     
-    /* Transpose back */
+    /* Transpose back: scatter results to 4 transforms */
     for (size_t i = 0; i < n; i++) {
         int32_t tmp[4];
         vst1q_s32(tmp, lanes[i]);
@@ -229,12 +229,12 @@ static void fwht_i32_batch_neon_kernel(int32_t** FWHT_RESTRICT data_array,
 
 static void fwht_f64_batch_neon_kernel(double** FWHT_RESTRICT data_array,
                                         size_t n, size_t batch_offset) {
-    const size_t simd_width = 2;  /* NEON: 2 doubles per register */
+    const size_t simd_width = 2;
     
     float64x2_t* lanes = (float64x2_t*)fwht_batch_aligned_alloc(16, n * sizeof(float64x2_t));
     if (!lanes) return;
     
-    /* Transpose */
+    /* Transpose: gather one element from each of 2 transforms */
     for (size_t i = 0; i < n; i++) {
         double tmp[2];
         for (size_t j = 0; j < simd_width; j++) {
@@ -243,7 +243,7 @@ static void fwht_f64_batch_neon_kernel(double** FWHT_RESTRICT data_array,
         lanes[i] = vld1q_f64(tmp);
     }
     
-    /* Butterfly passes */
+    /* Butterfly passes - vectorized across 2 transforms */
     for (size_t h = 1; h < n; h <<= 1) {
         size_t stride = h << 1;
         
@@ -261,7 +261,7 @@ static void fwht_f64_batch_neon_kernel(double** FWHT_RESTRICT data_array,
         }
     }
     
-    /* Transpose back */
+    /* Transpose back: scatter results to 2 transforms */
     for (size_t i = 0; i < n; i++) {
         double tmp[2];
         vst1q_f64(tmp, lanes[i]);
@@ -274,6 +274,10 @@ static void fwht_f64_batch_neon_kernel(double** FWHT_RESTRICT data_array,
 }
 
 #endif /* FWHT_BATCH_HAVE_NEON */
+
+/* ============================================================================
+ * DISPATCH LOGIC
+ * ============================================================================ */
 
 /* ============================================================================
  * PUBLIC API

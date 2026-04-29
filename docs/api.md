@@ -75,6 +75,15 @@ fwht_status_t st = fwht_i32_batch(blocks, 256, 32);
 
 `fwht_f64_batch` mirrors the same interface for double precision. Expect 3–5× speedups for `n ≤ 256`.
 
+When your batch is already stored contiguously, use the contiguous variants to avoid pointer packing overhead and to let persistent GPU contexts reuse their device buffers directly:
+
+```c
+int32_t *slab = malloc(32 * 256 * sizeof(int32_t));
+fwht_context_t* ctx = fwht_create_context(NULL);
+fwht_status_t st = fwht_batch_i32_contiguous(ctx, slab, 256, 32);
+fwht_destroy_context(ctx);
+```
+
 ### Bit-packed Boolean transforms
 
 Popcount-based routines avoid expanding Boolean data to 32-bit integers:
@@ -106,9 +115,11 @@ fwht_i32_backend(data, 1024, FWHT_BACKEND_GPU);
 
 GPU features in `fwht.h`:
 - **Batch kernels**: `fwht_batch_i32_cuda`, `fwht_batch_f64_cuda`, `fwht_batch_f32_cuda` operate on host arrays (copies handled internally).
+- **Contiguous batch APIs**: `fwht_batch_i32_contiguous` and `fwht_batch_f64_contiguous` avoid array-of-pointers repacking and let persistent GPU contexts reuse a cached device buffer across repeated batch calls.
 - **Device-pointer APIs**: `fwht_batch_*_cuda_device` skip host copies when you already hold device memory.
 - **Bit-packed Boolean GPU path**: `fwht_boolean_packed_backend(..., FWHT_BACKEND_GPU)` expands 1-bit truth tables on the device for `n ≤ 65536`, saving PCIe bandwidth for CLI and S-box workflows.
 - **Boolean GPU contexts**: `fwht_gpu_boolean_context_{create,compute,destroy}` keep packed truth tables resident on device so repeated S-box transforms avoid `cudaMalloc`/`cudaMemcpy` overhead.
+- **Verification helper**: `fwht_gpu_mask_correlation_u8` computes batched linear-mask correlation sums on the GPU for callers that already hold random sample points, oracle bits, and byte masks on the host.
 - **FP16 Tensor Core path**: `fwht_batch_f16_cuda_device` accelerates fp16 workloads.
 - **Persistent contexts**: `fwht_gpu_context_create(max_n, max_batch)` plus `fwht_gpu_context_compute_*` amortize allocations across repeated calls.
 - **Profiling and tuning**: enable metrics via `fwht_gpu_set_profiling(true)` and read them with `fwht_gpu_get_last_metrics`. Adjust kernel behavior with `fwht_gpu_set_block_size`, `fwht_gpu_set_multi_shuffle`, and inspect device info (`fwht_gpu_get_device_name`, `fwht_gpu_get_compute_capability`, etc.).

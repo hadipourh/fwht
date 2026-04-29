@@ -126,7 +126,7 @@ static void fwht_print_simd_banner(void) {
 #elif defined(FWHT_HAVE_NEON)
     fprintf(stderr, "[libfwht] CPU backend: NEON vector path active\n");
 #else
-    fprintf(stderr, "[libfwht] CPU backend: scalar path active\n");
+    fprintf(stderr, "[libfwht] CPU backend: scalar path active (compiler auto-vectorization enabled)\n");
 #endif
 }
 
@@ -317,8 +317,8 @@ static inline void fwht_process_range_f64(double* FWHT_RESTRICT even,
     }
 #endif
 
-#if defined(FWHT_HAVE_NEON)
-    /* NEON: process 2 doubles at a time (128-bit = 2×64-bit) */
+#if defined(FWHT_HAVE_NEON) && (defined(__aarch64__) || defined(_M_ARM64))
+    /* AArch64 NEON: process 2 doubles at a time (128-bit = 2×64-bit) */
     if (count >= 2) {
         size_t neon_end = count & (size_t)~1;
         for (; j < neon_end; j += 2) {
@@ -482,7 +482,6 @@ static int fwht_butterfly_i32_recursive_safe(int32_t* data, size_t n) {
  * Main entry point for single-threaded CPU FWHT.
  */
 static void fwht_butterfly_i32(int32_t* data, size_t n) {
-    fwht_report_simd_mode();
     fwht_butterfly_i32_recursive_cpu(data, n);
 }
 
@@ -556,7 +555,12 @@ static void fwht_butterfly_f64(double* data, size_t n) {
  * ========================================================================== */
 
 #define FWHT_RECURSIVE_CUTOFF 512
-#define FWHT_OPENMP_DEFAULT_STAGE_THRESHOLD (SIZE_MAX)
+/* L2-sized tiles: 131072 doubles = 1 MiB, fits in L2 on most modern CPUs.
+ * Larger tiles reduce the number of memory-bound merge stages that follow the
+ * bootstrap phase.  The actual tile is capped downward by
+ * fwht_openmp_stage_tile_size() when there are not enough tiles for the
+ * requested thread count. */
+#define FWHT_OPENMP_DEFAULT_STAGE_THRESHOLD ((size_t)1 << 17)
 #define FWHT_OPENMP_DEFAULT_STAGE_CHUNK 0
 
 static size_t fwht_openmp_stage_threshold_cache = 0;
@@ -573,13 +577,13 @@ static size_t fwht_get_openmp_stage_threshold(void) {
     if (env && *env) {
         char* endptr = NULL;
         unsigned long long value = strtoull(env, &endptr, 10);
-        if (endptr != env && value >= (unsigned long long)(FWHT_RECURSIVE_CUTOFF << 1)) {
+        if (endptr != env && value >= 2ull) {
             threshold = (size_t)value;
         }
     }
 
-    if (threshold < (size_t)(FWHT_RECURSIVE_CUTOFF << 1)) {
-        threshold = (size_t)(FWHT_RECURSIVE_CUTOFF << 1);
+    if (threshold < 2u) {
+        threshold = 2u;
     }
 
     fwht_openmp_stage_threshold_cache = threshold;
@@ -628,6 +632,48 @@ static int fwht_stage_chunk_for_blocks(size_t blocks, int thread_count) {
     return (int)per_thread;
 }
 
+static size_t fwht_floor_power_of_two(size_t value) {
+    size_t result = 1u;
+
+    while (result <= (value >> 1)) {
+        result <<= 1;
+    }
+
+    return result;
+}
+
+static size_t fwht_openmp_stage_tile_size(size_t n, int thread_count) {
+    size_t tile_size = fwht_get_openmp_stage_threshold();
+    size_t min_blocks = (thread_count > 1) ? (size_t)thread_count : 1u;
+
+    if (tile_size > n) {
+        tile_size = n;
+    }
+    tile_size = fwht_floor_power_of_two(tile_size);
+
+    while (tile_size > 2u && (n / tile_size) < min_blocks) {
+        tile_size >>= 1;
+    }
+
+    return tile_size;
+}
+
+static size_t fwht_stage_segments_per_block(size_t stage_h,
+                                            size_t blocks,
+                                            int thread_count) {
+    size_t target_chunks = (thread_count > 1) ? (size_t)thread_count * 4u : 1u;
+    size_t segments = (target_chunks + blocks - 1u) / blocks;
+
+    if (segments < 1u) {
+        segments = 1u;
+    }
+    if (segments > stage_h) {
+        segments = stage_h;
+    }
+
+    return segments;
+}
+
 static int fwht_openmp_task_depth(int num_threads) {
     if (num_threads < 4) {
         return 2;
@@ -658,46 +704,65 @@ static void fwht_butterfly_i32_base(int32_t* data, size_t n) {
 }
 
 static void fwht_butterfly_i32_parallel_stage(int32_t* data, size_t n) {
-    size_t stage_threshold = fwht_get_openmp_stage_threshold();
-    size_t h = 1;
-
-    while (h < n && (h << 1) < stage_threshold) {
-        size_t stride = h << 1;
-        for (size_t i = 0; i < n; i += stride) {
-#if defined(__GNUC__) || defined(__clang__)
-            if (i + stride < n) {
-                __builtin_prefetch(data + i + stride, 1, 3);
-                __builtin_prefetch(data + i + stride + h, 1, 3);
-            }
-#endif
-            fwht_process_range_i32(data + i, data + i + h, h);
-        }
-        h <<= 1;
-    }
-
-    if (h >= n) {
-        return;
-    }
-
     #pragma omp parallel
     {
         int thread_count = omp_get_num_threads();
-        for (size_t stage_h = h; stage_h < n; stage_h <<= 1) {
+        size_t tile_size = fwht_openmp_stage_tile_size(n, thread_count);
+        size_t tile_blocks = n / tile_size;
+        int tile_chunk = fwht_stage_chunk_for_blocks(tile_blocks, thread_count);
+
+        /* Bootstrap: each tile is a full WHT using the cache-oblivious
+         * recursive CPU kernel so that the per-tile work stays L2-resident. */
+        #pragma omp for schedule(static, tile_chunk)
+        for (size_t block = 0; block < tile_blocks; ++block) {
+            fwht_butterfly_i32_recursive_cpu(data + block * tile_size, tile_size);
+        }
+
+        /* Merge stages: butterfly between adjacent tiles, doubling each time. */
+        for (size_t stage_h = tile_size; stage_h < n; stage_h <<= 1) {
             size_t stride = stage_h << 1;
             size_t blocks = n / stride;
-            int chunk = fwht_stage_chunk_for_blocks(blocks, thread_count);
 
-            #pragma omp for schedule(static, chunk)
-            for (size_t block = 0; block < blocks; ++block) {
-                size_t base = block * stride;
+            if (blocks >= (size_t)thread_count) {
+                int chunk = fwht_stage_chunk_for_blocks(blocks, thread_count);
+
+                #pragma omp for schedule(static, chunk)
+                for (size_t block = 0; block < blocks; ++block) {
+                    size_t base = block * stride;
 
 #if defined(__GNUC__) || defined(__clang__)
-                if (block + 1 < blocks) {
-                    __builtin_prefetch(data + base + stride, 1, 3);
-                    __builtin_prefetch(data + base + stride + stage_h, 1, 3);
-                }
+                    if (block + 1 < blocks) {
+                        __builtin_prefetch(data + base + stride, 1, 3);
+                        __builtin_prefetch(data + base + stride + stage_h, 1, 3);
+                    }
 #endif
-                fwht_process_range_i32(data + base, data + base + stage_h, stage_h);
+                    fwht_process_range_i32(data + base, data + base + stage_h, stage_h);
+                }
+            } else {
+                size_t segments_per_block = fwht_stage_segments_per_block(stage_h,
+                                                                          blocks,
+                                                                          thread_count);
+                size_t segment_len = (stage_h + segments_per_block - 1u) / segments_per_block;
+                size_t total_segments = blocks * segments_per_block;
+
+                #pragma omp for schedule(static)
+                for (size_t segment = 0; segment < total_segments; ++segment) {
+                    size_t block = segment / segments_per_block;
+                    size_t segment_index = segment % segments_per_block;
+                    size_t offset = segment_index * segment_len;
+
+                    if (offset < stage_h) {
+                        size_t count = stage_h - offset;
+                        size_t base = block * stride + offset;
+
+                        if (count > segment_len) {
+                            count = segment_len;
+                        }
+                        fwht_process_range_i32(data + base,
+                                               data + base + stage_h,
+                                               count);
+                    }
+                }
             }
         }
     }
@@ -788,46 +853,65 @@ static void fwht_butterfly_f64_base(double* data, size_t n) {
 }
 
 static void fwht_butterfly_f64_parallel_stage(double* data, size_t n) {
-    size_t stage_threshold = fwht_get_openmp_stage_threshold();
-    size_t h = 1;
-
-    while (h < n && (h << 1) < stage_threshold) {
-        size_t stride = h << 1;
-        for (size_t i = 0; i < n; i += stride) {
-#if defined(__GNUC__) || defined(__clang__)
-            if (i + stride < n) {
-                __builtin_prefetch(data + i + stride, 1, 3);
-                __builtin_prefetch(data + i + stride + h, 1, 3);
-            }
-#endif
-            fwht_process_range_f64(data + i, data + i + h, h);
-        }
-        h <<= 1;
-    }
-
-    if (h >= n) {
-        return;
-    }
-
     #pragma omp parallel
     {
         int thread_count = omp_get_num_threads();
-        for (size_t stage_h = h; stage_h < n; stage_h <<= 1) {
+        size_t tile_size = fwht_openmp_stage_tile_size(n, thread_count);
+        size_t tile_blocks = n / tile_size;
+        int tile_chunk = fwht_stage_chunk_for_blocks(tile_blocks, thread_count);
+
+        /* Bootstrap: each tile is a full WHT using the cache-oblivious
+         * recursive CPU kernel so that the per-tile work stays L2-resident. */
+        #pragma omp for schedule(static, tile_chunk)
+        for (size_t block = 0; block < tile_blocks; ++block) {
+            fwht_butterfly_f64_recursive_cpu(data + block * tile_size, tile_size);
+        }
+
+        /* Merge stages: butterfly between adjacent tiles, doubling each time. */
+        for (size_t stage_h = tile_size; stage_h < n; stage_h <<= 1) {
             size_t stride = stage_h << 1;
             size_t blocks = n / stride;
-            int chunk = fwht_stage_chunk_for_blocks(blocks, thread_count);
 
-            #pragma omp for schedule(static, chunk)
-            for (size_t block = 0; block < blocks; ++block) {
-                size_t base = block * stride;
+            if (blocks >= (size_t)thread_count) {
+                int chunk = fwht_stage_chunk_for_blocks(blocks, thread_count);
+
+                #pragma omp for schedule(static, chunk)
+                for (size_t block = 0; block < blocks; ++block) {
+                    size_t base = block * stride;
 
 #if defined(__GNUC__) || defined(__clang__)
-                if (block + 1 < blocks) {
-                    __builtin_prefetch(data + base + stride, 1, 3);
-                    __builtin_prefetch(data + base + stride + stage_h, 1, 3);
-                }
+                    if (block + 1 < blocks) {
+                        __builtin_prefetch(data + base + stride, 1, 3);
+                        __builtin_prefetch(data + base + stride + stage_h, 1, 3);
+                    }
 #endif
-                fwht_process_range_f64(data + base, data + base + stage_h, stage_h);
+                    fwht_process_range_f64(data + base, data + base + stage_h, stage_h);
+                }
+            } else {
+                size_t segments_per_block = fwht_stage_segments_per_block(stage_h,
+                                                                          blocks,
+                                                                          thread_count);
+                size_t segment_len = (stage_h + segments_per_block - 1u) / segments_per_block;
+                size_t total_segments = blocks * segments_per_block;
+
+                #pragma omp for schedule(static)
+                for (size_t segment = 0; segment < total_segments; ++segment) {
+                    size_t block = segment / segments_per_block;
+                    size_t segment_index = segment % segments_per_block;
+                    size_t offset = segment_index * segment_len;
+
+                    if (offset < stage_h) {
+                        size_t count = stage_h - offset;
+                        size_t base = block * stride + offset;
+
+                        if (count > segment_len) {
+                            count = segment_len;
+                        }
+                        fwht_process_range_f64(data + base,
+                                               data + base + stage_h,
+                                               count);
+                    }
+                }
             }
         }
     }
@@ -1012,7 +1096,11 @@ fwht_status_t fwht_i32_backend(int32_t* data, size_t n, fwht_backend_t backend) 
     switch (backend) {
         case FWHT_BACKEND_CPU:
             fwht_report_simd_mode();
+        #if defined(__x86_64__) && defined(__AVX2__)
+            fwht_butterfly_i32_avx2(data, n);
+        #else
             fwht_butterfly_i32(data, n);
+        #endif
             return FWHT_SUCCESS;
         
         case FWHT_BACKEND_CPU_SAFE:
@@ -1479,6 +1567,42 @@ struct fwht_context {
     fwht_config_t config;
 };
 
+#ifdef _OPENMP
+typedef struct {
+    bool active;
+    int old_dynamic;
+    int old_num_threads;
+} fwht_openmp_scope_t;
+
+static void fwht_openmp_scope_begin(fwht_openmp_scope_t* scope,
+                                    fwht_backend_t backend,
+                                    int num_threads) {
+    scope->active = false;
+    scope->old_dynamic = 0;
+    scope->old_num_threads = 0;
+
+    if (backend != FWHT_BACKEND_OPENMP || num_threads <= 0 || !fwht_has_openmp()) {
+        return;
+    }
+
+    scope->active = true;
+    scope->old_dynamic = omp_get_dynamic();
+    scope->old_num_threads = omp_get_max_threads();
+
+    omp_set_dynamic(0);
+    omp_set_num_threads(num_threads);
+}
+
+static void fwht_openmp_scope_end(const fwht_openmp_scope_t* scope) {
+    if (!scope->active) {
+        return;
+    }
+
+    omp_set_dynamic(scope->old_dynamic);
+    omp_set_num_threads(scope->old_num_threads);
+}
+#endif
+
 fwht_config_t fwht_default_config(void) {
     fwht_config_t config;
     config.backend = FWHT_BACKEND_AUTO;
@@ -1520,14 +1644,42 @@ fwht_status_t fwht_transform_i32(fwht_context_t* ctx, int32_t* data, size_t n) {
     if (ctx == NULL) {
         return fwht_i32(data, n);
     }
-    return fwht_i32_backend(data, n, ctx->config.backend);
+
+    fwht_backend_t backend = ctx->config.backend;
+    if (backend == FWHT_BACKEND_AUTO) {
+        backend = fwht_recommend_backend(n);
+    }
+
+#ifdef _OPENMP
+    fwht_openmp_scope_t scope;
+    fwht_openmp_scope_begin(&scope, backend, ctx->config.num_threads);
+    fwht_status_t status = fwht_i32_backend(data, n, backend);
+    fwht_openmp_scope_end(&scope);
+    return status;
+#else
+    return fwht_i32_backend(data, n, backend);
+#endif
 }
 
 fwht_status_t fwht_transform_f64(fwht_context_t* ctx, double* data, size_t n) {
     if (ctx == NULL) {
         return fwht_f64(data, n);
     }
-    return fwht_f64_backend(data, n, ctx->config.backend);
+
+    fwht_backend_t backend = ctx->config.backend;
+    if (backend == FWHT_BACKEND_AUTO) {
+        backend = fwht_recommend_backend(n);
+    }
+
+#ifdef _OPENMP
+    fwht_openmp_scope_t scope;
+    fwht_openmp_scope_begin(&scope, backend, ctx->config.num_threads);
+    fwht_status_t status = fwht_f64_backend(data, n, backend);
+    fwht_openmp_scope_end(&scope);
+    return status;
+#else
+    return fwht_f64_backend(data, n, backend);
+#endif
 }
 
 fwht_status_t fwht_batch_i32(fwht_context_t* ctx, int32_t** data_array, 
@@ -1556,6 +1708,8 @@ fwht_status_t fwht_batch_i32(fwht_context_t* ctx, int32_t** data_array,
 #ifdef _OPENMP
     if (backend == FWHT_BACKEND_OPENMP) {
         fwht_status_t first_error = FWHT_SUCCESS;
+        fwht_openmp_scope_t scope;
+        fwht_openmp_scope_begin(&scope, backend, (ctx != NULL) ? ctx->config.num_threads : 0);
         
         /* Disable nested parallelism to prevent deadlocks */
     #if _OPENMP >= 200805
@@ -1589,6 +1743,8 @@ fwht_status_t fwht_batch_i32(fwht_context_t* ctx, int32_t** data_array,
     #else
         omp_set_nested(old_nested);
     #endif
+
+        fwht_openmp_scope_end(&scope);
         
         return first_error;
     }
@@ -1629,6 +1785,8 @@ fwht_status_t fwht_batch_f64(fwht_context_t* ctx, double** data_array,
 #ifdef _OPENMP
     if (backend == FWHT_BACKEND_OPENMP) {
         fwht_status_t first_error = FWHT_SUCCESS;
+        fwht_openmp_scope_t scope;
+        fwht_openmp_scope_begin(&scope, backend, (ctx != NULL) ? ctx->config.num_threads : 0);
         
         /* Disable nested parallelism to prevent deadlocks */
     #if _OPENMP >= 200805
@@ -1662,6 +1820,8 @@ fwht_status_t fwht_batch_f64(fwht_context_t* ctx, double** data_array,
     #else
         omp_set_nested(old_nested);
     #endif
+
+        fwht_openmp_scope_end(&scope);
         
         return first_error;
     }
