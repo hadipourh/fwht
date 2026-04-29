@@ -720,6 +720,9 @@ int fwht_log2(size_t n);
 /* Get recommended backend for given size */
 fwht_backend_t fwht_recommend_backend(size_t n);
 
+/* Get recommended backend for repeated host-side batch work */
+fwht_backend_t fwht_recommend_batch_backend(size_t n, size_t batch_size);
+
 /* Get version string */
 const char* fwht_version(void);
 

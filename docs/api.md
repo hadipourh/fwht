@@ -25,6 +25,10 @@ Fundamentals:
 - Transforms run in-place; allocate `n` elements before calling any routine.
 - The API is thread-safe as long as every thread works on its own buffers.
 
+Backend-selection helpers:
+- `fwht_recommend_backend(n)` recommends a backend for one transform of size `n`.
+- `fwht_recommend_batch_backend(n, batch_size)` recommends a backend for repeated host-side batch work by applying the same threshold logic to total work `n * batch_size`.
+
 ---
 
 ## 2. Core Integer Transforms
@@ -211,7 +215,7 @@ Install locally with `pip install -e python/` or build a wheel via `python -m bu
 
 ### Customizing backend thresholds
 
-`fwht_recommend_backend()` now reads host-specific thresholds from `meta/backend_threshold.json` when the file exists. Run `make tune-backend` to benchmark CPU vs OpenMP locally; the generated file overrides the default heuristics (CPU→OpenMP at 2^13, CPU→GPU at 2^20). If you skip the tuning step, the compile-time defaults stay in effect.
+`fwht_recommend_backend()` and `fwht_recommend_batch_backend()` read host-specific thresholds from `meta/backend_threshold.json` when the file exists. Run `make tune-backend` to benchmark CPU vs OpenMP locally; the generated file overrides the default heuristics (CPU→OpenMP at 2^13, CPU→GPU at 2^20). If you skip the tuning step, the compile-time defaults stay in effect.
 
 ---
 

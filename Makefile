@@ -195,7 +195,7 @@ endif
 # Build Targets
 # ============================================================================
 
-.PHONY: all clean test install lib static shared directories bench cli tune-backend ffht-bench fftw-bench
+.PHONY: all clean test install lib static shared directories bench cli tune-backend ffht-bench fftw-bench resync-lib
 
 ifeq ($(RUN_TESTS),1)
 all: directories lib test
@@ -212,6 +212,9 @@ directories:
 
 # Build both static and shared libraries
 lib: static shared
+
+# Compatibility target used by downstream sibling projects such as libgl.
+resync-lib: directories lib
 
 # Build command-line utility
 cli: directories lib $(CLI_BIN)
