@@ -70,6 +70,8 @@ LDFLAGS =
 
 # Platform Detection (early, needed for conditional source lists)
 UNAME_S := $(shell uname -s)
+UNAME_M := $(shell uname -m)
+BUILD_PLATFORM := $(UNAME_S)-$(UNAME_M)
 
 # Directories
 SRC_DIR = src
@@ -80,6 +82,7 @@ LIB_DIR = lib
 TOOLS_DIR = tools
 BENCH_DIR = bench
 EXAMPLES_DIR = examples
+BUILD_PLATFORM_STAMP = $(BUILD_DIR)/.platform-$(BUILD_PLATFORM)
 
 # Output
 LIB_NAME = libfwht
@@ -195,7 +198,7 @@ endif
 # Build Targets
 # ============================================================================
 
-.PHONY: all clean test install lib static shared directories bench cli tune-backend ffht-bench fftw-bench resync-lib
+.PHONY: all clean test install lib static shared directories bench cli tune-backend ffht-bench fftw-bench resync-lib platform-sanity FORCE
 
 ifeq ($(RUN_TESTS),1)
 all: directories lib test
@@ -210,11 +213,35 @@ example: examples
 directories:
 	@mkdir -p $(BUILD_DIR) $(LIB_DIR)
 
+platform-sanity: $(BUILD_PLATFORM_STAMP)
+
+FORCE:
+
+$(BUILD_PLATFORM_STAMP): FORCE | directories
+	@set -e; \
+	other_stamps=$$(find $(BUILD_DIR) -maxdepth 1 -name '.platform-*' ! -name '.platform-$(BUILD_PLATFORM)' -print); \
+	legacy_artifacts=; \
+	if [ ! -f "$(BUILD_PLATFORM_STAMP)" ]; then \
+		legacy_artifacts=$$(find $(BUILD_DIR) -maxdepth 1 ! -name '.platform-*' ! -path '$(BUILD_DIR)' -print -quit); \
+		if [ -z "$$legacy_artifacts" ] && { [ -e "$(STATIC_LIB)" ] || [ -e "$(SHARED_LIB)" ] || [ -e "$(LIB_DIR)/$(LIB_NAME).dylib" ]; }; then \
+			legacy_artifacts=1; \
+		fi; \
+	fi; \
+	if [ -n "$$other_stamps" ] || [ -n "$$legacy_artifacts" ]; then \
+		rm -rf $(BUILD_DIR)/* $(STATIC_LIB) $(SHARED_LIB) $(LIB_DIR)/$(LIB_NAME).dylib; \
+		rm -f $(BUILD_DIR)/.platform-*; \
+	fi; \
+	if [ ! -f "$(BUILD_PLATFORM_STAMP)" ]; then \
+		touch "$(BUILD_PLATFORM_STAMP)"; \
+	fi
+
 # Build both static and shared libraries
-lib: static shared
+lib: platform-sanity
+	@$(MAKE) static shared
 
 # Compatibility target used by downstream sibling projects such as libgl.
-resync-lib: directories lib
+resync-lib: platform-sanity
+	@$(MAKE) static shared
 
 # Build command-line utility
 cli: directories lib $(CLI_BIN)
@@ -259,17 +286,17 @@ $(TUNER_BIN): $(TUNER_SRC) $(STATIC_LIB)
 	$(CC) $(CFLAGS) $< -L$(LIB_DIR) -lfwht -lm -o $@ -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
 
 # Compile source files
-$(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.c $(BUILD_PLATFORM_STAMP)
 	@echo "Compiling: $<"
 	$(CC) $(CFLAGS) -fPIC -c $< -o $@
 
 # Compile CUDA files
-$(BUILD_DIR)/%.o: $(SRC_DIR)/%.cu
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.cu $(BUILD_PLATFORM_STAMP)
 	@echo "Compiling CUDA: $<"
 	$(NVCC) $(NVCCFLAGS) -c $< -o $@
 
 # Compile test files
-$(BUILD_DIR)/%.o: $(TEST_DIR)/%.c
+$(BUILD_DIR)/%.o: $(TEST_DIR)/%.c $(BUILD_PLATFORM_STAMP)
 	@echo "Compiling test: $<"
 	$(CC) $(CFLAGS) -c $< -o $@
 
