@@ -12,9 +12,11 @@
 #include <pybind11/stl.h>
 
 #ifdef USE_CUDA
-#include <dlpack/dlpack.h>
 #include <cuda_runtime.h>  // For cudaMalloc, cudaMemcpy, cudaFree
 #include <cuda_fp16.h>  // C++ header, must be outside extern "C"
+#if defined(PYFWHT_HAS_DLPACK)
+#include <dlpack/dlpack.h>
+#endif
 #endif
 
 extern "C" {
@@ -924,6 +926,7 @@ public:
     }
 };
 
+#ifdef PYFWHT_HAS_DLPACK
 // GPU DLPack Support - Zero-copy interop with PyTorch, CuPy, JAX, etc.
 namespace {
 inline void consume_dlpack_capsule(py::capsule capsule) {
@@ -1076,6 +1079,8 @@ void py_fwht_batch_f16_dlpack(py::capsule dlpack_tensor, size_t n, size_t batch_
         throw std::runtime_error("fwht_batch_f16_cuda_device failed with error code: " + std::to_string(status));
     }
 }
+
+#endif  // PYFWHT_HAS_DLPACK
 
 // GPU Toggles
 class PyGPUToggles {
@@ -1287,6 +1292,7 @@ with the entire LAT; otherwise None.)pbdoc");
             py::arg("data"), py::arg("n"), py::arg("batch_size"),
             "Batch WHT for float16 on GPU (uses Tensor Cores on sm_70+, achieves 1115 GOps/s @ n=4096 with PyTorch DLPack)");
     
+    #if defined(PYFWHT_HAS_DLPACK)
     // DLPack-based zero-copy batch processing
     gpu.def("batch_f64_dlpack", &py_fwht_batch_f64_dlpack,
             py::arg("dlpack_tensor"), py::arg("n"), py::arg("batch_size"),
@@ -1300,6 +1306,7 @@ with the entire LAT; otherwise None.)pbdoc");
     gpu.def("batch_f16_dlpack", &py_fwht_batch_f16_dlpack,
             py::arg("dlpack_tensor"), py::arg("n"), py::arg("batch_size"),
             "Zero-copy batch WHT for float16 via DLPack (Meta-inspired maximum-speed kernel, up to 54× faster than fp64, 1115 GOps/s)");
+    #endif
     
     // GPU Context
     py::class_<PyGPUContext>(gpu, "Context", "Persistent GPU context for repeated transforms")

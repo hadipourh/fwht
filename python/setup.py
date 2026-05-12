@@ -11,6 +11,20 @@ from pathlib import Path
 from setuptools import setup, Extension
 from pybind11.setup_helpers import Pybind11Extension, build_ext
 
+
+def find_torch_include_dir() -> Path | None:
+    """Return Torch's C++ include directory when it provides DLPack headers."""
+    try:
+        import torch
+    except ImportError:
+        return None
+
+    torch_root = Path(torch.__file__).resolve().parent
+    candidate = torch_root / "include"
+    if (candidate / "dlpack" / "dlpack.h").exists():
+        return candidate
+    return None
+
 # Paths relative to python/ directory
 PYTHON_DIR = Path(__file__).parent.absolute()
 PROJECT_ROOT = PYTHON_DIR.parent  # Go up to libfwht/
@@ -107,6 +121,14 @@ extra_compile_args = ['-O3', '-std=c++17', '-fPIC']
 extra_link_args = []
 define_macros = []
 include_dirs_list = [str(INCLUDE_DIR), str(SRC_DIR), str(PYTHON_DIR / "include")]  # Add DLPack include path
+
+torch_include_dir = find_torch_include_dir()
+if torch_include_dir is not None:
+    include_dirs_list.append(str(torch_include_dir))
+    define_macros.append(('PYFWHT_HAS_DLPACK', '1'))
+    print(f"DLPack headers: using Torch include dir at {torch_include_dir}")
+else:
+    print("DLPack headers: not found; building without zero-copy DLPack GPU APIs")
 
 # Platform-specific optimizations
 if sys.platform == 'darwin':  # macOS
