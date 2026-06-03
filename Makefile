@@ -23,6 +23,8 @@
 # ============================================================================
 
 RUN_TESTS ?= 0
+PREFIX ?= /usr/local
+DESTDIR ?=
 
 CC = gcc
 CXX = g++
@@ -437,21 +439,29 @@ clean:
 
 # Install library (requires sudo on most systems)
 install: lib
-	@echo "Installing library to /usr/local..."
-	install -d /usr/local/lib
-	install -m 644 $(STATIC_LIB) /usr/local/lib/
-	install -m 755 $(SHARED_LIB) /usr/local/lib/
-	install -d /usr/local/include
-	install -m 644 $(INCLUDE_DIR)/fwht.h /usr/local/include/
+	@echo "Installing library to $(DESTDIR)$(PREFIX)..."
+	install -d $(DESTDIR)$(PREFIX)/lib
+	install -m 644 $(STATIC_LIB) $(DESTDIR)$(PREFIX)/lib/
+	install -m 755 $(SHARED_LIB) $(DESTDIR)$(PREFIX)/lib/
+	install -d $(DESTDIR)$(PREFIX)/include
+	install -m 644 $(INCLUDE_DIR)/fwht.h $(DESTDIR)$(PREFIX)/include/
+	@if [ -f $(CLI_BIN) ]; then \
+	  echo "Installing $(CLI_BIN) to $(DESTDIR)$(PREFIX)/bin"; \
+	  install -d $(DESTDIR)$(PREFIX)/bin; \
+	  install -m 755 $(CLI_BIN) $(DESTDIR)$(PREFIX)/bin/; \
+	else \
+	  echo "Skipping CLI installation, see make help."; \
+	fi
 	@echo "Installation complete!"
 
 # Uninstall
 uninstall:
 	@echo "Uninstalling library..."
-	rm -f /usr/local/lib/$(LIB_NAME).a
-	rm -f /usr/local/lib/$(LIB_NAME).so
-	rm -f /usr/local/lib/$(LIB_NAME).dylib
-	rm -f /usr/local/include/fwht.h
+	rm -f $(DESTDIR)$(PREFIX)/lib/$(LIB_NAME).a
+	rm -f $(DESTDIR)$(PREFIX)/lib/$(LIB_NAME).so
+	rm -f $(DESTDIR)$(PREFIX)/lib/$(LIB_NAME).dylib
+	rm -f $(DESTDIR)$(PREFIX)/include/fwht.h
+	rm -f $(DESTDIR)$(PREFIX)/bin/fwht_cli
 	@echo "Uninstallation complete!"
 
 # ============================================================================
@@ -510,8 +520,10 @@ help:
 	@echo "  sbox-bench - Generate random S-boxes and benchmark LAT"
 	@echo "  examples  - Build example programs under $(EXAMPLES_DIR)/"
 	@echo "  clean     - Remove build artifacts"
-	@echo "  install   - Install library to /usr/local (requires sudo)"
-	@echo "  uninstall - Remove installed library"
+	@echo "  install   - Install library to \$$(DESTDIR)\$$(PREFIX) (default to /usr/local requires sudo)"
+	@echo "              To use a custom install path: make PREFIX=/My/Custom/Install/Path install"
+	@echo "  uninstall - Remove installed library to \$$(DESTDIR)\$$(PREFIX) (default to /usr/local requires sudo)"
+	@echo "              To remove installed library with custom path: make PREFIX=/My/Custom/Install/Path uninstall"
 	@echo ""
 	@echo "Development:"
 	@echo "  debug     - Build with debug symbols"
