@@ -30,8 +30,8 @@ Each cipher module should provide:
 - decryption oracle for `r` rounds
 - linear oracle interface
 - differential-linear oracle interface
-- helper to enumerate fixed HW1/HW2 masks
-- helper to enumerate fixed HW1/HW2 differences
+- helper to enumerate fixed Hamming weight 1 and Hamming weight 2 masks
+- helper to enumerate fixed Hamming weight 1 and Hamming weight 2 differences
 
 The round-reduced oracle must not guess hidden round conventions.
 
@@ -46,22 +46,8 @@ $$
 $$
 
 - The same rule is used for differential-linear bias.
-- If a per-key value is sampled with `m` texts, correct the squared value before the key average.
-
-$$
-c^2_{\mathrm{corr}} = \frac{m c^2 - 1}{m - 1}
-$$
-
-- Clip the corrected value to `[0, 1]`.
 - Keep one running `sum_squared[mask]` array.
 - Do not keep a full `key_count x mask_count` table unless it is needed for debug output.
-
-## Exact Mode Or Sampled Mode
-
-- Exact full-space mode is good for one fixed key only when memory is large enough.
-- Sampled mode is better for many keys.
-- Sampled mode is also better when the block size is close to 32 bits.
-- Do not make 32-bit exact full-space mode the default.
 
 ## Linear Analysis
 
@@ -73,7 +59,7 @@ Fixed-side rule:
 For the forward side:
 
 - fix one input mask
-- for one exact query, stream over all outputs and call the decryption oracle
+- for one query, stream over all outputs and call the decryption oracle
 - if many queries use the same fixed key and memory is enough, build the inverse codebook once
 - index the table by output value
 - build the truth table `(-1)^(<input_mask, inverse_output>)`
@@ -83,7 +69,7 @@ For the forward side:
 For the backward side:
 
 - fix one output mask
-- for one exact query, stream over all inputs and call the encryption oracle
+- for one query, stream over all inputs and call the encryption oracle
 - if many queries use the same fixed key and memory is enough, build the forward codebook once
 - index the table by input value
 - build the truth table `(-1)^(<output_mask, forward_output>)`
@@ -105,7 +91,7 @@ Fixed-side rule:
 For the forward side:
 
 - fix one input difference
-- for one exact query, stream over all inputs and compute the two encryptions on the fly
+- for one query, stream over all inputs and compute the two encryptions on the fly
 - if many queries use the same fixed key and memory is enough, build the forward codebook once
 - compute `T[x] xor T[x xor diff]`
 - build the histogram of derivative outputs
@@ -115,7 +101,7 @@ For the forward side:
 For the backward side:
 
 - fix one output difference
-- for one exact query, stream over all outputs and compute the two decryptions on the fly
+- for one query, stream over all outputs and compute the two decryptions on the fly
 - if many queries use the same fixed key and memory is enough, build the inverse codebook once
 - compute `U[y] xor U[y xor diff]`
 - build the histogram of inverse-derivative outputs
@@ -144,9 +130,9 @@ Exact cost for block size `n`:
 - memory without a stored codebook: `Theta(2^n)`
 - memory with one stored codebook: still `Theta(2^n)`, but with a larger constant
 
-## Codebook Or On-Demand
+## Codebook Or Streaming
 
-- For one exact query, stream the oracle on demand.
+- For one query, stream the oracle on demand.
 - For many queries with the same fixed key and rounds, precompute one codebook only if the memory budget allows it.
 - Do not precompute both forward and inverse tables unless both are really needed.
 - For many keys, process one key at a time.
@@ -173,15 +159,15 @@ Exact cost for block size `n`:
 - One `int32` FWHT vector of length `2^32` is 16 GiB but it cannot safely hold exact unnormalized coefficients at 32 bits.
 - One `fp64` FWHT vector of length `2^32` is 32 GiB.
 - So exact full-space work at 32 bits is a special high-memory mode.
-- The default path for 32-bit ciphers should be sampled or streamed unless a memory check says exact mode is safe.
+- The default path for 32-bit ciphers should use streaming unless a memory check says a stored codebook is safe.
 
 ## Implementation Plan For A New Cipher
 
 1. Define the round-reduced encryption and decryption oracles.
 2. Fix the block format and bit order.
-3. Implement the HW1/HW2 mask enumerator and the HW1/HW2 difference enumerator.
-4. Implement the linear exact builder and the linear sampled builder.
-5. Implement the differential-linear exact builder and the differential-linear sampled builder.
+3. Implement the Hamming weight 1 and Hamming weight 2 mask enumerator and difference enumerator.
+4. Implement the linear builder.
+5. Implement the differential-linear builder.
 6. Connect both builders to libfwht.
 7. Add the RMS-over-keys reducer.
 8. Add small known-answer tests.
@@ -195,5 +181,4 @@ Exact cost for block size `n`:
 - Check that mask indexing is stable.
 - Check that repeated runs give the same result.
 - Check that RMS is unchanged by random key sign flips.
-- Check that exact and sampled modes agree on small cases.
-- Check that the fixed-side enumerator returns only HW1 and HW2 masks or differences.
+- Check that the fixed-side enumerator returns only Hamming weight 1 and Hamming weight 2 masks or differences.
