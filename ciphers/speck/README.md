@@ -7,8 +7,8 @@ Files:
 - `speck32_exact.h`: public API
 - `speck32_exact.c`: exact linear and differential-linear core
 - `test_speck32_exact.c`: self-test
-- `speck32_linear_sweep.py`: sweep fixed input and output masks
-- `speck32_dl_sweep.py`: sweep fixed input differences
+- `speck32_linear_sweep.py`: Python driver for sweeping fixed input and output masks
+- `speck32_dl_sweep.py`: Python driver for sweeping fixed input differences
 
 ## Build
 
@@ -19,6 +19,9 @@ make test-speck32 NO_CUDA=1
 make speck32-linear NO_CUDA=1
 make speck32-dl NO_CUDA=1
 ```
+
+The `speck32-linear` target also builds `build/speck32_linear_sweep`, and `speck32-dl`
+also builds `build/speck32_dl_sweep`.
 
 ## Self-Test
 
@@ -100,12 +103,25 @@ Run the exact search on a machine with enough memory:
 
 ## Sweep Scripts
 
+The Python sweep drivers now prefer the shared-process backends when they are available:
+
+- `build/speck32_linear_sweep`
+- `build/speck32_dl_sweep`
+
+Those backends keep a small chunk of full `2^32` spectra in one process so that key
+schedules and optional forward codebooks can be reused across several selectors. The old
+single-query binaries are still used as a fallback when the sweep backend is missing.
+
+Use `--chunk-size` on the Python drivers if you want to override the backend's automatic
+chunk selection.
+
 Linear sweep:
 
 ```bash
 python3 ciphers/speck/speck32_linear_sweep.py \
   --rounds 5 \
   --key 0x1918111009080100 \
+  --chunk-size 2 \
   --output-dir ./build/speck_runs
 ```
 
@@ -121,6 +137,7 @@ python3 ciphers/speck/speck32_linear_sweep.py \
   --rounds 5 \
   --num-keys 256 \
   --seed 0x1234 \
+  --chunk-size 2 \
   --output-dir ./build/speck_runs
 ```
 
@@ -135,6 +152,7 @@ DL sweep:
 python3 ciphers/speck/speck32_dl_sweep.py \
   --rounds 5 \
   --key 0x1918111009080100 \
+  --chunk-size 2 \
   --output-dir ./build/speck_runs
 ```
 
@@ -149,6 +167,7 @@ python3 ciphers/speck/speck32_dl_sweep.py \
   --rounds 5 \
   --num-keys 256 \
   --seed 0x1234 \
+  --chunk-size 2 \
   --output-dir ./build/speck_runs
 ```
 

@@ -121,6 +121,16 @@ def build_key_arguments(key_mode: KeyMode) -> List[str]:
     ]
 
 
+def build_environment(omp_threads: Optional[int]) -> Dict[str, str]:
+    env = os.environ.copy()
+    if omp_threads is not None:
+        env["OMP_NUM_THREADS"] = str(omp_threads)
+        env["OMP_DYNAMIC"] = "false"
+        env.setdefault("OMP_PROC_BIND", "spread")
+        env.setdefault("OMP_PLACES", "cores")
+    return env
+
+
 def run_query(
     binary_path: Path,
     fwht_root: Path,
@@ -149,12 +159,7 @@ def run_query(
     if unsafe_memory:
         command.append("--unsafe-memory")
 
-    env = os.environ.copy()
-    if omp_threads is not None:
-        env["OMP_NUM_THREADS"] = str(omp_threads)
-        env["OMP_DYNAMIC"] = "false"
-        env.setdefault("OMP_PROC_BIND", "spread")
-        env.setdefault("OMP_PLACES", "cores")
+    env = build_environment(omp_threads)
 
     try:
         completed = subprocess.run(
@@ -189,6 +194,60 @@ def run_query(
             f"stdout:\n{completed.stdout}"
         )
     return results
+
+
+def run_backend_sweep(
+    binary_path: Path,
+    fwht_root: Path,
+    rounds: int,
+    key_mode: KeyMode,
+    output_path: Path,
+    top_k: int,
+    use_codebook: bool,
+    unsafe_memory: bool,
+    omp_threads: Optional[int],
+    chunk_size: Optional[int],
+) -> None:
+    command = [
+        str(binary_path),
+        "--rounds",
+        str(rounds),
+        *build_key_arguments(key_mode),
+        "--csv-output",
+        str(output_path),
+        "--top",
+        str(top_k),
+        "--force",
+    ]
+
+    if use_codebook:
+        command.append("--codebook")
+    if unsafe_memory:
+        command.append("--unsafe-memory")
+    if chunk_size is not None:
+        command.extend(["--chunk-size", str(chunk_size)])
+
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=fwht_root,
+            env=build_environment(omp_threads),
+            check=False,
+        )
+    except OSError as exc:
+        if exc.errno == errno.ENOEXEC:
+            raise RuntimeError(
+                f"cannot execute {binary_path}\n"
+                "The shared-process Speck binary is not runnable on this host. "
+                "This usually means a stale binary copied from another OS or CPU architecture.\n"
+                "Rebuild it on the current machine with: make speck32-dl NO_CUDA=1"
+            ) from exc
+        raise RuntimeError(f"failed to launch {binary_path}: {exc}") from exc
+
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"shared-process DL sweep command failed with exit code {completed.returncode}"
+        )
 
 
 def output_path_for(
@@ -234,6 +293,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=None,
         help="set OMP_NUM_THREADS for each run",
     )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=None,
+        help="shared-process backend only: number of fixed input differences per chunk",
+    )
     return parser
 
 
@@ -245,6 +310,8 @@ def main() -> int:
         parser.error("rounds must be in [1, 22]")
     if args.top_k <= 0:
         parser.error("top-k must be positive")
+    if args.chunk_size is not None and args.chunk_size <= 0:
+        parser.error("chunk-size must be positive")
 
     key_mode = resolve_key_mode(parser, args)
     if key_mode["mode"] == "random_keys":
@@ -254,73 +321,93 @@ def main() -> int:
         )
 
     fwht_root = Path(__file__).resolve().parents[2]
+    sweep_binary_path = fwht_root / "build" / "speck32_dl_sweep"
     binary_path = fwht_root / "build" / "speck32_dl"
-    if not binary_path.is_file():
-        parser.error("missing build/speck32_dl, run: make speck32-dl NO_CUDA=1")
+    use_shared_backend = sweep_binary_path.is_file()
+    if not use_shared_backend and not binary_path.is_file():
+        parser.error("missing build/speck32_dl or build/speck32_dl_sweep, run: make speck32-dl NO_CUDA=1")
 
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_path_for(output_dir, args.rounds, key_mode, args.top_k)
 
-    fixed_differences = enumerate_hw_one_two()
-    key_hex = "" if key_mode["key"] is None else f"0x{int(key_mode['key']):016x}"
-    seed_hex = "" if key_mode["seed"] is None else f"0x{int(key_mode['seed']):016x}"
-    num_keys_text = "" if key_mode["num_keys"] is None else str(int(key_mode["num_keys"]))
-
-    with output_path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(
-            [
-                "rounds",
-                "key_mode",
-                "key_hex",
-                "num_keys",
-                "seed_hex",
-                "fixed_input_difference_hex",
-                "fixed_input_difference_weight",
-                "rank",
-                "output_mask_hex",
-                "metric_name",
-                "metric_pow2",
-                "abs_metric_pow2",
-            ]
+    if use_shared_backend:
+        print(
+            f"using shared-process sweep backend: {sweep_binary_path}",
+            file=sys.stderr,
         )
+        run_backend_sweep(
+            binary_path=sweep_binary_path,
+            fwht_root=fwht_root,
+            rounds=args.rounds,
+            key_mode=key_mode,
+            output_path=output_path,
+            top_k=args.top_k,
+            use_codebook=args.codebook,
+            unsafe_memory=args.unsafe_memory,
+            omp_threads=args.omp_threads,
+            chunk_size=args.chunk_size,
+        )
+    else:
+        fixed_differences = enumerate_hw_one_two()
+        key_hex = "" if key_mode["key"] is None else f"0x{int(key_mode['key']):016x}"
+        seed_hex = "" if key_mode["seed"] is None else f"0x{int(key_mode['seed']):016x}"
+        num_keys_text = "" if key_mode["num_keys"] is None else str(int(key_mode["num_keys"]))
 
-        total = len(fixed_differences)
-        for index, input_difference in enumerate(fixed_differences, start=1):
-            print(
-                f"[input-difference {index}/{total}] 0x{input_difference:08x}",
-                file=sys.stderr,
-                flush=True,
+        with output_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(
+                [
+                    "rounds",
+                    "key_mode",
+                    "key_hex",
+                    "num_keys",
+                    "seed_hex",
+                    "fixed_input_difference_hex",
+                    "fixed_input_difference_weight",
+                    "rank",
+                    "output_mask_hex",
+                    "metric_name",
+                    "metric_pow2",
+                    "abs_metric_pow2",
+                ]
             )
-            results = run_query(
-                binary_path=binary_path,
-                fwht_root=fwht_root,
-                rounds=args.rounds,
-                key_mode=key_mode,
-                input_difference=input_difference,
-                top_k=args.top_k,
-                use_codebook=args.codebook,
-                unsafe_memory=args.unsafe_memory,
-                omp_threads=args.omp_threads,
-            )
-            for result in results:
-                writer.writerow(
-                    [
-                        args.rounds,
-                        key_mode["mode"],
-                        key_hex,
-                        num_keys_text,
-                        seed_hex,
-                        f"0x{input_difference:08x}",
-                        hamming_weight(input_difference),
-                        result["rank"],
-                        result["output_mask_hex"],
-                        result["metric_name"],
-                        result["metric_pow2"],
-                        result["abs_metric_pow2"],
-                    ]
+
+            total = len(fixed_differences)
+            for index, input_difference in enumerate(fixed_differences, start=1):
+                print(
+                    f"[input-difference {index}/{total}] 0x{input_difference:08x}",
+                    file=sys.stderr,
+                    flush=True,
                 )
+                results = run_query(
+                    binary_path=binary_path,
+                    fwht_root=fwht_root,
+                    rounds=args.rounds,
+                    key_mode=key_mode,
+                    input_difference=input_difference,
+                    top_k=args.top_k,
+                    use_codebook=args.codebook,
+                    unsafe_memory=args.unsafe_memory,
+                    omp_threads=args.omp_threads,
+                )
+                for result in results:
+                    writer.writerow(
+                        [
+                            args.rounds,
+                            key_mode["mode"],
+                            key_hex,
+                            num_keys_text,
+                            seed_hex,
+                            f"0x{input_difference:08x}",
+                            hamming_weight(input_difference),
+                            result["rank"],
+                            result["output_mask_hex"],
+                            result["metric_name"],
+                            result["metric_pow2"],
+                            result["abs_metric_pow2"],
+                        ]
+                    )
 
     print(f"wrote {output_path}")
     return 0

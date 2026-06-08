@@ -104,7 +104,9 @@ SHARED_LIB = $(LIB_DIR)/$(LIB_NAME).so
 TEST_BIN = $(BUILD_DIR)/test_correctness
 SPECK32_TEST_BIN = $(BUILD_DIR)/test_speck32_exact
 SPECK32_LINEAR_BIN = $(BUILD_DIR)/speck32_linear
+SPECK32_LINEAR_SWEEP_BIN = $(BUILD_DIR)/speck32_linear_sweep
 SPECK32_DL_BIN = $(BUILD_DIR)/speck32_dl
+SPECK32_DL_SWEEP_BIN = $(BUILD_DIR)/speck32_dl_sweep
 CLI_SRC = $(TOOLS_DIR)/fwht_cli.c
 CLI_BIN = $(BUILD_DIR)/fwht_cli
 TUNER_SRC = $(TOOLS_DIR)/backend_tuner.c
@@ -121,7 +123,9 @@ SPECK32_CIPHER_DIR = ciphers/speck
 SPECK32_MODULE_SRC = $(SPECK32_CIPHER_DIR)/speck32_exact.c
 SPECK32_TEST_SRC = $(SPECK32_CIPHER_DIR)/test_speck32_exact.c
 SPECK32_LINEAR_SRC = $(TOOLS_DIR)/speck32_linear.c
+SPECK32_LINEAR_SWEEP_SRC = $(TOOLS_DIR)/speck32_linear_sweep.c
 SPECK32_DL_SRC = $(TOOLS_DIR)/speck32_dl.c
+SPECK32_DL_SWEEP_SRC = $(TOOLS_DIR)/speck32_dl_sweep.c
 
 # Source files (CPU)
 SRCS = $(wildcard $(SRC_DIR)/*.c)
@@ -219,7 +223,7 @@ endif
 # Build Targets
 # ============================================================================
 
-.PHONY: all clean test install lib static shared directories bench cli tune-backend ffht-bench fftw-bench resync-lib platform-sanity test-speck32 speck32-linear speck32-dl FORCE
+.PHONY: all clean test install lib static shared directories bench cli tune-backend ffht-bench fftw-bench resync-lib platform-sanity test-speck32 speck32-linear speck32-linear-sweep speck32-dl speck32-dl-sweep FORCE
 
 ifeq ($(RUN_TESTS),1)
 all: directories lib test
@@ -446,11 +450,23 @@ speck32-linear: directories lib
 	@echo "Building Speck32 linear-analysis tool..."
 	$(CC) $(CFLAGS) $(SPECK32_LINEAR_SRC) $(SPECK32_MODULE_SRC) -L$(LIB_DIR) -lfwht $(CUDA_LDFLAGS) $(LDFLAGS) -lm -o $(SPECK32_LINEAR_BIN) -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
 	@echo "Run with: $(SPECK32_LINEAR_BIN) --help"
+	@$(MAKE) speck32-linear-sweep NO_CUDA=$(NO_CUDA)
+
+speck32-linear-sweep: directories lib
+	@echo "Building Speck32 linear sweep backend..."
+	$(CC) $(CFLAGS) $(SPECK32_LINEAR_SWEEP_SRC) $(SPECK32_MODULE_SRC) -L$(LIB_DIR) -lfwht $(CUDA_LDFLAGS) $(LDFLAGS) -lm -o $(SPECK32_LINEAR_SWEEP_BIN) -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
+	@echo "Run with: $(SPECK32_LINEAR_SWEEP_BIN) --help"
 
 speck32-dl: directories lib
 	@echo "Building Speck32 differential-linear tool..."
 	$(CC) $(CFLAGS) $(SPECK32_DL_SRC) $(SPECK32_MODULE_SRC) -L$(LIB_DIR) -lfwht $(CUDA_LDFLAGS) $(LDFLAGS) -lm -o $(SPECK32_DL_BIN) -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
 	@echo "Run with: $(SPECK32_DL_BIN) --help"
+	@$(MAKE) speck32-dl-sweep NO_CUDA=$(NO_CUDA)
+
+speck32-dl-sweep: directories lib
+	@echo "Building Speck32 differential-linear sweep backend..."
+	$(CC) $(CFLAGS) $(SPECK32_DL_SWEEP_SRC) $(SPECK32_MODULE_SRC) -L$(LIB_DIR) -lfwht $(CUDA_LDFLAGS) $(LDFLAGS) -lm -o $(SPECK32_DL_SWEEP_BIN) -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
+	@echo "Run with: $(SPECK32_DL_SWEEP_BIN) --help"
 
 # Build and run GPU callback tests
 test-gpu-callbacks: directories lib

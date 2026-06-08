@@ -121,6 +121,16 @@ def build_key_arguments(key_mode: KeyMode) -> List[str]:
     ]
 
 
+def build_environment(omp_threads: Optional[int]) -> Dict[str, str]:
+    env = os.environ.copy()
+    if omp_threads is not None:
+        env["OMP_NUM_THREADS"] = str(omp_threads)
+        env["OMP_DYNAMIC"] = "false"
+        env.setdefault("OMP_PROC_BIND", "spread")
+        env.setdefault("OMP_PLACES", "cores")
+    return env
+
+
 def run_query(
     binary_path: Path,
     fwht_root: Path,
@@ -150,12 +160,7 @@ def run_query(
     if unsafe_memory:
         command.append("--unsafe-memory")
 
-    env = os.environ.copy()
-    if omp_threads is not None:
-        env["OMP_NUM_THREADS"] = str(omp_threads)
-        env["OMP_DYNAMIC"] = "false"
-        env.setdefault("OMP_PROC_BIND", "spread")
-        env.setdefault("OMP_PLACES", "cores")
+    env = build_environment(omp_threads)
 
     try:
         completed = subprocess.run(
@@ -190,6 +195,64 @@ def run_query(
             f"stdout:\n{completed.stdout}"
         )
     return results
+
+
+def run_backend_sweep(
+    binary_path: Path,
+    fwht_root: Path,
+    rounds: int,
+    key_mode: KeyMode,
+    fixed_side: str,
+    output_path: Path,
+    top_k: int,
+    use_codebook: bool,
+    unsafe_memory: bool,
+    omp_threads: Optional[int],
+    chunk_size: Optional[int],
+) -> None:
+    command = [
+        str(binary_path),
+        "--rounds",
+        str(rounds),
+        *build_key_arguments(key_mode),
+        "--fixed-side",
+        fixed_side,
+        "--csv-output",
+        str(output_path),
+        "--top",
+        str(top_k),
+        "--force",
+    ]
+
+    if use_codebook:
+        command.append("--codebook")
+    if unsafe_memory:
+        command.append("--unsafe-memory")
+    if chunk_size is not None:
+        command.extend(["--chunk-size", str(chunk_size)])
+
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=fwht_root,
+            env=build_environment(omp_threads),
+            check=False,
+        )
+    except OSError as exc:
+        if exc.errno == errno.ENOEXEC:
+            raise RuntimeError(
+                f"cannot execute {binary_path}\n"
+                "The shared-process Speck binary is not runnable on this host. "
+                "This usually means a stale binary copied from another OS or CPU architecture.\n"
+                "Rebuild it on the current machine with: make speck32-linear NO_CUDA=1"
+            ) from exc
+        raise RuntimeError(f"failed to launch {binary_path}: {exc}") from exc
+
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"shared-process sweep command failed for fixed {fixed_side} masks "
+            f"with exit code {completed.returncode}"
+        )
 
 
 def output_path_for(
@@ -312,6 +375,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=None,
         help="set OMP_NUM_THREADS for each run",
     )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=None,
+        help="shared-process backend only: number of fixed masks per chunk",
+    )
     return parser
 
 
@@ -323,6 +392,8 @@ def main() -> int:
         parser.error("rounds must be in [1, 22]")
     if args.top_k <= 0:
         parser.error("top-k must be positive")
+    if args.chunk_size is not None and args.chunk_size <= 0:
+        parser.error("chunk-size must be positive")
 
     key_mode = resolve_key_mode(parser, args)
     if key_mode["mode"] == "random_keys":
@@ -332,9 +403,11 @@ def main() -> int:
         )
 
     fwht_root = Path(__file__).resolve().parents[2]
+    sweep_binary_path = fwht_root / "build" / "speck32_linear_sweep"
     binary_path = fwht_root / "build" / "speck32_linear"
-    if not binary_path.is_file():
-        parser.error("missing build/speck32_linear, run: make speck32-linear NO_CUDA=1")
+    use_shared_backend = sweep_binary_path.is_file()
+    if not use_shared_backend and not binary_path.is_file():
+        parser.error("missing build/speck32_linear or build/speck32_linear_sweep, run: make speck32-linear NO_CUDA=1")
 
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -354,30 +427,62 @@ def main() -> int:
         args.top_k,
     )
 
-    write_sweep(
-        binary_path=binary_path,
-        fwht_root=fwht_root,
-        rounds=args.rounds,
-        key_mode=key_mode,
-        fixed_side="input",
-        output_path=input_path,
-        top_k=args.top_k,
-        use_codebook=args.codebook,
-        unsafe_memory=args.unsafe_memory,
-        omp_threads=args.omp_threads,
-    )
-    write_sweep(
-        binary_path=binary_path,
-        fwht_root=fwht_root,
-        rounds=args.rounds,
-        key_mode=key_mode,
-        fixed_side="output",
-        output_path=output_path,
-        top_k=args.top_k,
-        use_codebook=args.codebook,
-        unsafe_memory=args.unsafe_memory,
-        omp_threads=args.omp_threads,
-    )
+    if use_shared_backend:
+        print(
+            f"using shared-process sweep backend: {sweep_binary_path}",
+            file=sys.stderr,
+        )
+        run_backend_sweep(
+            binary_path=sweep_binary_path,
+            fwht_root=fwht_root,
+            rounds=args.rounds,
+            key_mode=key_mode,
+            fixed_side="input",
+            output_path=input_path,
+            top_k=args.top_k,
+            use_codebook=args.codebook,
+            unsafe_memory=args.unsafe_memory,
+            omp_threads=args.omp_threads,
+            chunk_size=args.chunk_size,
+        )
+        run_backend_sweep(
+            binary_path=sweep_binary_path,
+            fwht_root=fwht_root,
+            rounds=args.rounds,
+            key_mode=key_mode,
+            fixed_side="output",
+            output_path=output_path,
+            top_k=args.top_k,
+            use_codebook=args.codebook,
+            unsafe_memory=args.unsafe_memory,
+            omp_threads=args.omp_threads,
+            chunk_size=args.chunk_size,
+        )
+    else:
+        write_sweep(
+            binary_path=binary_path,
+            fwht_root=fwht_root,
+            rounds=args.rounds,
+            key_mode=key_mode,
+            fixed_side="input",
+            output_path=input_path,
+            top_k=args.top_k,
+            use_codebook=args.codebook,
+            unsafe_memory=args.unsafe_memory,
+            omp_threads=args.omp_threads,
+        )
+        write_sweep(
+            binary_path=binary_path,
+            fwht_root=fwht_root,
+            rounds=args.rounds,
+            key_mode=key_mode,
+            fixed_side="output",
+            output_path=output_path,
+            top_k=args.top_k,
+            use_codebook=args.codebook,
+            unsafe_memory=args.unsafe_memory,
+            omp_threads=args.omp_threads,
+        )
 
     print(f"wrote {input_path}")
     print(f"wrote {output_path}")

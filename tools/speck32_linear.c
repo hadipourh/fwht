@@ -7,6 +7,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #if defined(__APPLE__)
 #include <sys/sysctl.h>
 #elif defined(__linux__)
@@ -327,10 +331,34 @@ static int insert_top_entry(speck32_linear_top_entry_t* entries,
     return 1;
 }
 
+static void initialize_top_entries(speck32_linear_top_entry_t* entries, size_t entry_count) {
+    size_t index;
+
+    for (index = 0u; index < entry_count; ++index) {
+        entries[index].mask = 0u;
+        entries[index].correlation = 0.0;
+        entries[index].score = -1.0;
+    }
+}
+
+static void merge_top_entries(speck32_linear_top_entry_t* dst,
+                              size_t entry_count,
+                              const speck32_linear_top_entry_t* src) {
+    size_t index;
+
+    for (index = 0u; index < entry_count; ++index) {
+        if (src[index].score < 0.0) {
+            break;
+        }
+        insert_top_entry(dst, entry_count, src[index].mask, src[index].correlation);
+    }
+}
+
 static void print_top_results(const speck32_linear_options_t* options,
                               const double* spectrum,
                               size_t spectrum_length) {
     speck32_linear_top_entry_t* entries;
+    speck32_linear_top_entry_t* local_entries = NULL;
     const bool use_rms = options->key_count_is_set && options->key_count > 1u;
     char signed_buffer[64];
     char abs_buffer[64];
@@ -342,14 +370,47 @@ static void print_top_results(const speck32_linear_options_t* options,
         return;
     }
 
-    for (index = 0u; index < options->top_k; ++index) {
-        entries[index].mask = 0u;
-        entries[index].correlation = 0.0;
-        entries[index].score = -1.0;
-    }
+    initialize_top_entries(entries, options->top_k);
 
-    for (index = 0u; index < spectrum_length; ++index) {
-        insert_top_entry(entries, options->top_k, (uint32_t)index, spectrum[index]);
+#ifdef _OPENMP
+    if (options->top_k > 0u && spectrum_length >= (size_t)(1u << 20)) {
+        const int thread_count = omp_get_max_threads();
+
+        local_entries = (speck32_linear_top_entry_t*)malloc((size_t)thread_count * options->top_k * sizeof(*local_entries));
+        if (local_entries == NULL) {
+            fprintf(stderr,
+                    "Warning: unable to allocate the OpenMP result buffers (%s). Falling back to serial top-k scan.\n",
+                    strerror(errno));
+        } else {
+            for (index = 0u; index < (size_t)thread_count; ++index) {
+                initialize_top_entries(local_entries + index * options->top_k, options->top_k);
+            }
+
+            #pragma omp parallel
+            {
+                speck32_linear_top_entry_t* thread_entries = local_entries + (size_t)omp_get_thread_num() * options->top_k;
+                size_t spectrum_index;
+
+                #pragma omp for schedule(static)
+                for (spectrum_index = 0u; spectrum_index < spectrum_length; ++spectrum_index) {
+                    insert_top_entry(thread_entries,
+                                     options->top_k,
+                                     (uint32_t)spectrum_index,
+                                     spectrum[spectrum_index]);
+                }
+            }
+
+            for (index = 0u; index < (size_t)thread_count; ++index) {
+                merge_top_entries(entries, options->top_k, local_entries + index * options->top_k);
+            }
+        }
+    }
+#endif
+
+    if (local_entries == NULL) {
+        for (index = 0u; index < spectrum_length; ++index) {
+            insert_top_entry(entries, options->top_k, (uint32_t)index, spectrum[index]);
+        }
     }
 
     if (use_rms) {
@@ -377,6 +438,7 @@ static void print_top_results(const speck32_linear_options_t* options,
         }
     }
 
+    free(local_entries);
     free(entries);
 }
 
